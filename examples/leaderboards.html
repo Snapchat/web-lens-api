@@ -1,0 +1,34 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Leaderboards example</title>
+<style>body { font: 16px system-ui; padding: 24px; } button { font-size: 16px; margin-right: 8px; }</style>
+
+<h1>Leaderboards</h1>
+<p>Score: <b id="score">0</b></p>
+<button id="play">Play (+10)</button>
+<button id="over" disabled>Game over → submit</button>
+<button id="board" disabled>Show leaderboard</button>
+<p id="status"></p>
+
+<script src="../dist/snap-api.js"></script>
+<script>
+  const $ = (id) => document.getElementById(id);
+  let score = 0;
+
+  snapchat.init().then(() => {
+    const available = snapchat.isSupported('leaderboards');
+    $('over').disabled = $('board').disabled = !available;
+    $('status').textContent = available ? 'leaderboards ready' : 'leaderboards not available on this host';
+  });
+
+  $('play').onclick = () => { score += 10; $('score').textContent = score; };
+
+  $('over').onclick = async () => {
+    const { bestScore } = await snapchat.leaderboards.submitScore({ score });
+    $('status').textContent = `submitted ${score}, personal best ${bestScore}`;
+    score = 0; $('score').textContent = score;
+  };
+
+  // Opens the native trophy panel. Submit first so it has data.
+  $('board').onclick = () => snapchat.leaderboards.show();
+</script>

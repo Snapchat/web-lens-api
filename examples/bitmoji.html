@@ -1,0 +1,46 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Bitmoji example</title>
+<style>body { font: 16px system-ui; padding: 24px; } img { height: 96px; margin: 4px; background: #eee; border-radius: 8px; }</style>
+
+<h1>Your Bitmoji</h1>
+<div id="portrait"></div>
+<h2>Pick a variant</h2>
+<div id="variants"></div>
+<p id="status"></p>
+
+<script src="../dist/snap-api.js"></script>
+<script>
+  const $ = (id) => document.getElementById(id);
+  // Default avatar on the same rig every user's GLB uses (shared with the bitmoji-dance example). Inside
+  // Snapchat get3DAvatar() returns the real avatar; a Lens must bundle any fallback like this one.
+  // For testing on the desktop, the same avatar (with its facial blend shapes, ~2.5 MB) is public on
+  // Snap's CDN, CORS-open: https://cf-st.sc-cdn.net/3d/glb/99084526856_24?atlas=false&lod=0&ua=2&usePbr=true
+  // A Lens can't fetch it at runtime (the CSP blocks it), so don't ship code that depends on it.
+  const DEFAULT_AVATAR_GLB = './bitmoji-dance/assets/avatar_default.glb';
+
+  function img(parent, url) {
+    const el = new Image(); el.src = url; parent.appendChild(el); return el;
+  }
+
+  snapchat.init().then(async () => {
+    if (!snapchat.isSupported('bitmoji')) return ($('status').textContent = 'bitmoji not available');
+    const { hasAvatar } = await snapchat.bitmoji.getAvatarInfo();
+
+    // URLs are same-origin and short-lived: render right away, never cache the string.
+    if (hasAvatar) img($('portrait'), (await snapchat.bitmoji.get2DAvatar({ size: 'large' })).url);
+
+    // Variants are unnamed ids; the avatar rendered in each one is its label.
+    const { variants } = hasAvatar ? await snapchat.bitmoji.getVariants() : { variants: [] };
+    for (const variant of variants) {
+      const { url } = await snapchat.bitmoji.get2DAvatar({ variant, size: 'small' });
+      img($('variants'), url).onclick = () => ($('status').textContent = `picked variant ${variant}`);
+    }
+
+    // Rigged GLB (the Bitmoji rig, no clips) — feed it to your engine's GLB loader. The stub's GLB is
+    // an empty placeholder, so on desktop (or with no avatar) load the public default avatar instead.
+    const url = snapchat.isStub || !hasAvatar ? DEFAULT_AVATAR_GLB : (await snapchat.bitmoji.get3DAvatar()).url;
+    const glb = await fetch(url).then((r) => r.arrayBuffer());
+    $('status').textContent = `3D avatar: ${glb.byteLength} bytes of GLB${url === DEFAULT_AVATAR_GLB ? ' (default avatar)' : ''}`;
+  });
+</script>

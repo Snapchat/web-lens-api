@@ -1,0 +1,63 @@
+{
+  "name": "@snap/web-lens-api",
+  "version": "0.1.2",
+  "description": "JavaScript API for Snapchat Web Lenses: leaderboards, Bitmoji and storage over the native bridge, with a desktop stub for development.",
+  "license": "MIT",
+  "author": "Snap Inc.",
+  "main": "dist/snap-api.mjs",
+  "types": "dist/types/index.d.mts",
+  "exports": {
+    ".": {
+      "types": "./dist/types/index.d.mts",
+      "default": "./dist/snap-api.mjs"
+    },
+    "./snap-api.js": "./dist/snap-api.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "sideEffects": true,
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "build:examples": "node scripts/build-examples.mjs",
+    "fetch-avatar": "node scripts/fetch-default-avatar.mjs",
+    "build:docs": "typedoc",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint . && node scripts/check-lockfile.mjs",
+    "pretest": "npm run build",
+    "test": "node tests/transport-selection.js && node tests/api-behaviour.js && node tests/types.js",
+    "prepack": "npm run build && node scripts/check-package-contents.mjs",
+    "clean": "rm -rf dist docs examples/bitmoji-dance/playcanvas.min.js examples/bitmoji-dance/snap-api.js",
+    "prepublishOnly": "node scripts/check-publish-tree.mjs && npm test"
+  },
+  "devDependencies": {
+    "@playcanvas/eslint-config": "^2.1.0",
+    "@typescript-eslint/eslint-plugin": "^8.71.0",
+    "@typescript-eslint/parser": "^8.71.0",
+    "esbuild": "^0.28.2",
+    "eslint": "^9.39.5",
+    "eslint-import-resolver-typescript": "^4.4.5",
+    "globals": "^17.13.0",
+    "playcanvas": "^2.23.0",
+    "typedoc": "^0.28.20",
+    "typescript": "^5.9.3"
+  },
+  "keywords": [
+    "snapchat",
+    "snap",
+    "web-lens",
+    "lens",
+    "playcanvas",
+    "bitmoji",
+    "leaderboards"
+  ]
+}

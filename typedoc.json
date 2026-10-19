@@ -1,0 +1,14 @@
+{
+  "$schema": "https://typedoc.org/schema.json",
+  "name": "Snapchat Web Lens API",
+  "entryPoints": ["src/index.ts"],
+  "out": "docs",
+  "readme": "README.md",
+  "includeVersion": true,
+  "excludePrivate": true,
+  "excludeInternal": true,
+  "disableSources": true,
+  "sort": ["source-order"],
+  "navigation": { "includeCategories": false, "includeGroups": true },
+  "treatWarningsAsErrors": true
+}

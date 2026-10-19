@@ -1,0 +1,57 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Storage example</title>
+<style>body { font: 16px system-ui; padding: 24px; } button { font-size: 16px; margin-right: 8px; }</style>
+
+<h1>Save game</h1>
+<p>Level <b id="level">–</b>, coins <b id="coins">–</b></p>
+<button id="win" disabled>Win level</button>
+<button id="reset" disabled>Reset save</button>
+<p id="status">loading save…</p>
+
+<script src="../dist/snap-api.js"></script>
+<script>
+  const $ = (id) => document.getElementById(id);
+  let save = { level: 1, coins: 0 };
+  let loaded = false;                 // no writes until the first read has answered
+  let pending = Promise.resolve();
+
+  function render() { $('level').textContent = save.level; $('coins').textContent = save.coins; }
+
+  // One chain keeps one call in flight; the catch keeps it going after a failure (the store is unchanged).
+  function queue(fn) {
+    pending = pending.then(fn).catch(e => ($('status').textContent = `failed: ${e.message}`));
+  }
+
+  render();
+  snapchat.init().then(async () => {
+    if (!snapchat.isSupported('storage')) return ($('status').textContent = 'storage not available, playing without saves');
+    // The first call of a session can take seconds. Play waits for it, so nothing is written over the
+    // save while it is still being read.
+    const { found, value } = await snapchat.storage.get('save');
+    if (found) save = value;
+    loaded = true;
+    render();
+    $('reset').disabled = false;
+    queue(async () => {
+      const { usedBytes, maxBytes, persistenceMode } = await snapchat.storage.getInfo();
+      $('status').textContent = `${usedBytes}/${maxBytes} bytes used, ${persistenceMode}`;
+    });
+  })
+  // A failed first read leaves the store as it was: play on, but don't save over a save we couldn't read.
+  .catch(e => ($('status').textContent = `load failed, playing without saves: ${e.message}`))
+  .then(() => ($('win').disabled = false));
+
+  $('win').onclick = () => {
+    save = { level: save.level + 1, coins: save.coins + 25 };
+    const state = save;
+    if (loaded) queue(() => snapchat.storage.set('save', state)); // any JSON ≤ 32 KiB, saved as it changes
+    render();
+  };
+
+  $('reset').onclick = () => {
+    queue(() => snapchat.storage.remove('save'));
+    save = { level: 1, coins: 0 };
+    render();
+  };
+</script>
