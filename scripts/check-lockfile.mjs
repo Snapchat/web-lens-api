@@ -14,7 +14,7 @@ const LOCKFILE = 'package-lock.json';
 const PUBLIC = 'https://registry.npmjs.org/';
 
 // Registry tarball URLs end in <name>/-/<file>.tgz whichever registry served them, and the tarball is the
-// same one, so swapping the prefix keeps the lockfile's integrity hash valid. Some mirrors (Artifactory)
+// same one, so swapping the prefix keeps the lockfile's integrity hash valid. Some mirrors
 // encode a scoped name's slash, as in @scope%2fname/-/name-1.0.0.tgz.
 function publicUrl(path, entry) {
     const name = entry.name ?? path.slice(path.lastIndexOf('node_modules/') + 'node_modules/'.length);
