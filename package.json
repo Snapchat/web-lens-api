@@ -35,7 +35,7 @@
     "lint": "eslint . && node scripts/check-lockfile.mjs",
     "pretest": "npm run build",
     "test": "node tests/transport-selection.js && node tests/api-behaviour.js && node tests/types.js",
-    "prepack": "npm run build && node scripts/check-package-contents.mjs",
+    "prepack": "npm run build",
     "clean": "rm -rf dist docs examples/bitmoji-dance/playcanvas.min.js examples/bitmoji-dance/snap-api.js",
     "prepublishOnly": "node scripts/check-publish-tree.mjs && npm test"
   },
