@@ -4,6 +4,10 @@
   "description": "JavaScript API for Snapchat Web Lenses: leaderboards, Bitmoji and storage over the native bridge, with a desktop stub for development.",
   "license": "MIT",
   "author": "Snap Inc.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Snapchat/web-lens-api.git"
+  },
   "main": "dist/snap-api.mjs",
   "types": "dist/types/index.d.mts",
   "exports": {
