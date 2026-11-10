@@ -10,7 +10,8 @@ if (dirty) {
     console.error(`Refusing to publish: uncommitted changes in\n${dirty}\nCommit or stash them, or publish from a clean checkout of main.`);
     process.exit(1);
 }
-const branch = execSync('git rev-parse --abbrev-ref HEAD', { encoding: 'utf8' }).trim();
+// Tag-triggered CI checks out a detached HEAD, so the branch check only applies to local publishes.
+const branch = process.env.GITHUB_ACTIONS ? 'main' : execSync('git rev-parse --abbrev-ref HEAD', { encoding: 'utf8' }).trim();
 if (branch !== 'main') {
     console.error(`Refusing to publish from branch "${branch}": publish from main.`);
     process.exit(1);
