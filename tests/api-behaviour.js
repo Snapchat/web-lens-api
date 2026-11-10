@@ -246,7 +246,7 @@ test('global: window.snapchat is the API and window.SnapSDK is a deprecated alia
     const api = load(win);
     assert.strictEqual(win.snapchat, api);
     assert.strictEqual(win.SnapSDK, api);
-    assert.strictEqual(api.version, '0.1.2');
+    assert.strictEqual(api.version, '0.1.3');
 });
 
 test('stub: errors are frozen and every code is exposed', () => {

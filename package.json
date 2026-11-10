@@ -1,6 +1,6 @@
 {
   "name": "@snap/web-lens-api",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "JavaScript API for Snapchat Web Lenses: leaderboards, Bitmoji and storage over the native bridge, with a desktop stub for development.",
   "license": "MIT",
   "author": "Snap Inc.",
