@@ -17,21 +17,34 @@ const root = path.join(__dirname, '..');
 const tsc = require.resolve('typescript/bin/tsc');
 
 const esm = `
-import snapchat, { errors, snapchat as named, type Get2DAvatarParams, type StorageInfo } from '@snap/web-lens-api';
+import snapchat, { errors, snapchat as named, type AvatarInfo, type FriendAvatar, type Get2DAvatarParams, type Get3DAvatarParams, type StorageInfo, type SubscriptionStatus, type UpgradeOutcome, type HapticEvent } from '@snap/web-lens-api';
 const version: string = snapchat.version;
 const same: typeof snapchat = named;
 const code: 'ERR_UNSUPPORTED_HOST' = errors.UNSUPPORTED_HOST;
 const info: StorageInfo | undefined = undefined;
 const portrait: Get2DAvatarParams = { size: 'small' };
+const friendPortrait: Get2DAvatarParams = { avatar: 'h', size: 'small' };
+const friends: Promise<{ avatars: FriendAvatar[] }> = snapchat.bitmoji.getFriendAvatars({ count: 3 });
+const lowModel: Get3DAvatarParams = { avatar: 'h', meshQuality: 'low', textureQuality: 'medium' };
+const lowModelCall = async () => snapchat.bitmoji.get3DAvatar(lowModel);
+const friendModel = async (friend: FriendAvatar) => snapchat.bitmoji.get3DAvatar(friend);
+const friendInfo: Promise<AvatarInfo> = snapchat.bitmoji.getAvatarInfo({ avatar: null });
+const status: Promise<SubscriptionStatus> = snapchat.subscription.getStatus();
+const upgrade: Promise<UpgradeOutcome> = snapchat.subscription.requestUpgrade();
+const off: () => void = snapchat.subscription.onStatusChanged(({ eligible }) => console.log(eligible));
+const tick: HapticEvent[] = [{ t: 0, type: 'tap' }, { t: 80, type: 'buzz', duration: 40, intensity: 0.5 }];
+const played: Promise<void> = snapchat.haptics.pattern(tick);
+const bump: Promise<void> = snapchat.haptics.impact('soft');
 window.snapchat.init();
-export { version, same, code, info, portrait };
+export { version, same, code, info, portrait, friendPortrait, friends, friendModel, friendInfo, status, upgrade, off, played, bump };
 `;
 
 const script = `
 /// <reference types="@snap/web-lens-api" />
 window.snapchat.init();
 const storage: import('@snap/web-lens-api').StorageAPI = window.snapchat.storage;
-export { storage };
+const subscription: import('@snap/web-lens-api').SubscriptionAPI = window.snapchat.subscription;
+export { storage, subscription };
 `;
 
 // [name, file, source, tsc options]

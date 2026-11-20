@@ -11,7 +11,8 @@ const pcTags = pcRules['jsdoc/check-tag-names']?.[1]?.definedTags ?? [];
 
 export default [
     {
-        ignores: ['dist/', 'docs/', 'examples/bitmoji-dance/playcanvas.min.js', 'examples/bitmoji-dance/snap-api.js']
+        ignores: ['dist/', 'docs/', 'examples/bitmoji-dance/playcanvas.min.js', 'examples/bitmoji-dance/snap-api.js',
+            'examples/bitmoji-low-poly/playcanvas.min.js', 'examples/bitmoji-low-poly/snap-api.js', 'examples/bitmoji-low-poly/meshopt_decoder.mjs']
     },
     ...playcanvasConfig,
     {

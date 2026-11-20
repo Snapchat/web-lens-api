@@ -1,7 +1,7 @@
 # Snapchat Web Lens API
 
 `@snap/web-lens-api` is the one script a Web Lens includes to reach native Snapchat capabilities:
-**leaderboards**, the user's **Bitmoji**, and account-bound **storage**. It talks to
+**leaderboards**, **Lens+ subscription**, the user's **Bitmoji**, account-bound **storage**, and **haptics**. It talks to
 the native JS bridge on iOS and Android, and falls back to a built-in **desktop stub** so you can build
 and debug the whole game in a normal browser, the [PlayCanvas Editor](https://playcanvas.com) launch page,
 or any local dev server.
@@ -48,16 +48,40 @@ if (snapchat.isSupported('leaderboards')) {
   await snapchat.leaderboards.show();
 }
 
+if (snapchat.isSupported('subscription')) {
+  const { eligible } = await snapchat.subscription.getStatus();   // gate Lens+ content on this
+  const outcome = await snapchat.subscription.requestUpgrade();   // Lens+ upsell → native paywall
+  // Fires when the entitlement changes while the Lens is active, e.g. a subscription made elsewhere.
+  const unsubscribe = snapchat.subscription.onStatusChanged(({ eligible }) => { /* react */ });
+}
+
 if (snapchat.isSupported('bitmoji')) {
   const { hasAvatar } = await snapchat.bitmoji.getAvatarInfo();
   const { variants } = await snapchat.bitmoji.getVariants();      // unnamed variant ids, server-curated
   const { url } = await snapchat.bitmoji.get2DAvatar({ variant: variants[0], size: 'large' });
   const glb = await snapchat.bitmoji.get3DAvatar();               // rigged GLB on the Bitmoji rig, no clips
+  const small = await snapchat.bitmoji.get3DAvatar({ meshQuality: 'medium', textureQuality: 'low' }); // smaller GLB; a mesh below high needs meshopt
 }
+
+// Friends' Bitmoji (bitmoji v2): opaque per-session handles, passed as `avatar`. Never store a handle.
+if (snapchat.isSupported('bitmoji', 2)) {
+  const { avatars } = await snapchat.bitmoji.getFriendAvatars({ count: 3 });   // ERR_INTERNAL: none right now
+  for (const friend of avatars) {                                 // [{ avatar: handle }]
+    const { url } = await snapchat.bitmoji.get3DAvatar(friend);   // same calls, a friend's Bitmoji
+  }
+}
+// The list is fixed for the session; an empty answer is kept for a cooldown (~30 s) before the host looks again.
 
 if (snapchat.isSupported('storage')) {
   const { found, value } = await snapchat.storage.get('save');    // per-Lens, account-bound JSON store
   await snapchat.storage.set('save', { level: found ? value.level + 1 : 1 });
+}
+
+if (snapchat.isSupported('haptics')) {
+  await snapchat.haptics.impact('heavy');                          // light | medium (default) | heavy | soft
+  // Up to 16 taps and buzzes in 1 s; build success/warning/error feels from these.
+  await snapchat.haptics.pattern([{ t: 0, type: 'tap', intensity: 0.5 }, { t: 80, type: 'tap' }]);
+  // Plays nothing when device haptics are off, or within 50 ms of the last haptic (or while its pattern plays).
 }
 ```
 
@@ -85,7 +109,8 @@ generated from the source with `npm run build:docs` (see [Development](#developm
   user's Bitmoji with the PlayCanvas engine and plays a dance clip from a GLB on it through the standard anim
   component. It is three script tags and one short `main.js`, with the engine and this API copied in as files,
   which is also what a real upload looks like: everything the game needs is in the zip, so nothing is fetched
-  at runtime.
+  at runtime. `examples/bitmoji-low-poly/` does the same with the smaller, meshopt-compressed model from
+  `get3DAvatar({ meshQuality: 'low' })`, decoded by `pc.meshoptInitialize`.
 
 ### Recipes
 
@@ -183,6 +208,59 @@ portrait.element.texture = placeholderTexture;
 unloadAsset(imageAsset);
 ```
 
+**Friends' Bitmoji as characters.** Hosts serving `bitmoji` v2 also serve the user's friends: `getFriendAvatars()`
+returns opaque handles, and each one passed as `avatar` to `get3DAvatar()`, `get2DAvatar()` or `getAvatarInfo()`
+answers for that friend. No name, user id or avatar id crosses the bridge, only the handle. What the host does:
+
+- **Who.** Up to `maxBatchCount` (from `getAvatarInfo()`, 20 by default, never above 50) of the user's most recent
+  friends who are mutual, not blocked, have a Bitmoji and share it in Friendmoji. Never the user.
+- **Order.** It shuffles them once and keeps that list for the session, so every call returns the first `count` of
+  the same list and the order says nothing about who the user talks to most. Ask once for the most you will show;
+  a later call with a bigger `count` returns the same first handles plus more.
+- **Fewer friends.** A short pool gives a shorter list, or an empty one. It is never padded, so fill the rest of
+  the scene with your own characters.
+- **Cooldown.** When it finds no eligible friends, or can't read the friend list (`ERR_INTERNAL`), it keeps that
+  answer for a cooldown, 30 seconds by default, before it looks again, so the friend list can finish syncing
+  without being re-read on every call. A call within the cooldown gets the same result; ask again at a natural
+  break, such as the next round, not in a loop.
+- **Handles.** Valid only in the Lens session that got them: a new session, or another Lens, gets new ones, and an
+  old handle rejects `ERR_INVALID_PARAMS` rather than answering with the user. Never store or parse one. Pass the
+  entry itself, `get3DAvatar(friend)`, not `get3DAvatar(friend.avatar)`: a bare string target rejects
+  `ERR_INVALID_PARAMS`. Entries never carry a field named like a call option, so `{ ...friend, size }` is safe. A call
+  that passes a handle, and `getFriendAvatars()` itself, before `init()` has resolved rejects `ERR_NOT_INITIALIZED`
+  (and logs a warning), on the desktop stub too, so a missing `init()` shows up while you build, not on a device.
+- **Support.** Check `isSupported('bitmoji', 2)`, as for any capability. After that, `ERR_INVALID_PARAMS` means a
+  bug in the call, such as a bad `count`, and `ERR_INTERNAL` means the friend list is unavailable right now: play
+  solo this round.
+
+Each friend is a full avatar GLB (about 1–3 MB), so load only the friends you show, and free each one when it
+leaves the scene:
+
+```js
+async function loadFriends(count) {
+  if (!snapchat.isSupported('bitmoji', 2) || snapchat.isStub) return [];   // the stub's GLBs are empty
+  let avatars = [];
+  try {
+    ({ avatars } = await snapchat.bitmoji.getFriendAvatars({ count }));
+  } catch (e) {
+    if (e.message !== snapchat.errors.INTERNAL) throw e;                      // ERR_INVALID_PARAMS: fix the call
+    console.warn('No friends this round:', e.message);                         // the list is unavailable right now
+  }
+  const assets = await Promise.all(avatars.map(async (friend, i) => {
+    try {
+      return await loadAsset(`friend-${i}`, 'container', (await snapchat.bitmoji.get3DAvatar(friend)).url);
+    } catch (e) {
+      console.warn('Skipping a friend:', e.message);
+      return null;
+    }
+  }));
+  return assets.filter(Boolean);
+}
+
+const friendAssets = await loadFriends(3);                                  // may be fewer than 3, or none
+for (const asset of friendAssets) app.root.addChild(asset.resource.instantiateRenderEntity());
+```
+
 **Save game.** Storage is per Lens and per account. The first call of a session opens the store and can take
 seconds on a cold start, so await it behind a loading state rather than timing it out, and write nothing until it
 has answered: a write before then replaces the save that is still being read. Save when the state changes and when
@@ -230,6 +308,47 @@ document.addEventListener('visibilitychange', () => {
 A `get` answers for the account signed in at that moment, so a value read at startup is a copy: write what
 changed as it changes, rather than writing that copy back later over saves made since.
 
+**Lens+ gated content.** Only booleans cross the bridge, and purchase runs natively: the game can ask for the
+upsell, never take payment.
+
+Only a Lens+ Lens has Lens+ content, so a Lens that calls `subscription` must be one. Submitting a new Lens whose
+code calls it enrolls the Lens in Lens+, with the usual Lens+ requirements: a verified phone number, Lens+ program
+eligibility, Public visibility, a video as the first preview, monthly Lens+ quota left, and no music. An update can't
+add the calls to a Lens that isn't Lens+, and during the limited beta only listed developers can submit one.
+Including this API without calling `subscription` doesn't count.
+
+On a Lens+ Lens, a user with Lens+ is eligible, and anyone else isn't until they subscribe. On a Lens that isn't
+Lens+ exclusive, every user is eligible and `requestUpgrade()` resolves `{ subscribed: true }` without showing
+anything, so whatever you gate on them is open to every user. That is the case:
+
+- until the Lens is live as a Lens+ Lens, some time after it passes review;
+- on push to device;
+- if the Lens stops being a Lens+ Lens;
+- if the submission scan found no calls, so the Lens was never enrolled. The scan looks for calls on
+  `snapchat.subscription` or a variable holding it, so call the methods there rather than passing the namespace to
+  a function.
+
+Build and test the locked path on the desktop stub, whose Lens+ user starts without the entitlement. Act on
+`requestUpgrade()`'s `subscribed` rather than waiting for `onStatusChanged`, which not every host sends:
+
+```js
+async function unlockBonusLevel() {
+  if (!snapchat.isSupported('subscription')) return false;
+  try {
+    if ((await snapchat.subscription.getStatus()).eligible) return true;
+    const { subscribed, reason } = await snapchat.subscription.requestUpgrade();
+    if (reason) console.info('Upsell not completed:', reason);   // 'too_soon' | 'already_in_flight' | 'user_ineligible'
+    return subscribed;
+  } catch (e) {
+    console.warn('Lens+ unavailable:', e.message);           // ERR_INTERNAL: nothing could present the upsell
+    return false;
+  }
+}
+
+// A subscription completed elsewhere (another Lens, Settings) arrives here when the host reports it.
+snapchat.subscription.onStatusChanged(({ eligible }) => setBonusLevelLocked(!eligible));
+```
+
 **Leaderboard at game over.** Submit first so the panel has data:
 
 ```js
@@ -255,11 +374,12 @@ params that cannot be serialized) is `ERR_INTERNAL`:
 |---|---|
 | `ERR_MALFORMED_REQUEST` | The request envelope or `app://<capability>/<action>` URI failed validation (API bug — file it). |
 | `ERR_UNKNOWN_CAPABILITY` | Not served on this app version / surface / Lens. Check `isSupported()` first. |
-| `ERR_INVALID_PARAMS` | Params rejected against the capability's allowlist (bad `ordering`, retired `variant`, a reserved parameter, non-integer `score`, unknown action…). |
-| `ERR_INTERNAL` | The capability failed natively; nothing to parse, retry or degrade. |
+| `ERR_INVALID_PARAMS` | Params rejected against the capability's allowlist (bad `ordering`, retired `variant`, a reserved parameter, non-integer `score`, a `count` below 1, an unknown or expired `avatar` handle, a bare string where a target object belongs, unknown action…). |
+| `ERR_INTERNAL` | The capability failed natively; nothing to parse, retry or degrade. For `getFriendAvatars()` it is kept for a cooldown before the host retries. |
 | `ERR_QUOTA_EXCEEDED` | A `storage` write would exceed the byte or key quota, or too many `storage` calls are in flight; the store is unchanged. |
 | `ERR_STORAGE_UNAVAILABLE` | `storage` has no durable backing on this device or session, or the Lens is closing (a save fired as it's swiped away). |
 | `ERR_UNSUPPORTED_HOST` | API-only: inside Snapchat, but this app version or its WebView can't serve the API (see below). |
+| `ERR_NOT_INITIALIZED` | API-only: a friend Bitmoji call (`getFriendAvatars()`, or any call passing `avatar`) ran before `init()` resolved. Nothing reached the host; await `init()` at startup. Other calls don't need it. |
 
 ## The three environments
 
@@ -278,8 +398,12 @@ emulation still gets the stub. Inside Snapchat without a bridge, every call reje
 echoes submitted scores, so parameter mistakes show up on the desktop. It can't reproduce what depends on the user or
 the device: a user without a Bitmoji, an expired media URL, `ERR_INTERNAL`, durable storage (it stores in memory), or
 the limit on `storage` calls in flight, so a save every frame only fails on a device.
-Its 3D avatar is an empty placeholder, so show your default avatar there (see the recipes). Test those paths on a
-device.
+Its 3D avatar is an empty placeholder, so show your default avatar there (see the recipes). It serves `bitmoji` v2
+with three fixed friends that wear the same placeholders, and no cooldown, so a user without friends and the
+cooldown only show up on a device. Its Lens+ user starts
+without the entitlement, and `requestUpgrade()` subscribes them after a fake 500 ms upsell and fires
+`onStatusChanged`; it never declines or throttles. Its `haptics` checks params like a device but vibrates
+nothing, so how a pattern feels only shows on a device. Test those paths on a device.
 
 iOS and Android serve the same capabilities; what differs is the app version, so check `isSupported()` rather
 than the platform.
@@ -301,8 +425,8 @@ npm install
 npm run build        # dist/snap-api.js, dist/snap-api.mjs, dist/types/  (esbuild + tsc)
 npm test             # builds, then runs tests/transport-selection.js, tests/api-behaviour.js and tests/types.js
 npm run build:docs   # TypeDoc → docs/  (open docs/index.html)
-npm run build:examples  # copies playcanvas.min.js and snap-api.js into examples/bitmoji-dance
-npm run fetch-avatar    # refreshes the committed default Bitmoji GLB used by that example
+npm run build:examples  # copies the engine, the API and the meshopt decoder into the PlayCanvas examples
+npm run fetch-avatar    # refreshes the committed default Bitmoji GLB (add `-- --low` for the low-poly one)
 npm run typecheck    # tsc --noEmit
 npm run lint         # ESLint with @playcanvas/eslint-config (`npx eslint . --fix` applies the fixable rules),
                      # then checks package-lock.json only downloads from registry.npmjs.org
@@ -321,17 +445,18 @@ src/
   errors.ts     ERR_* codes and rejection normalisation
   transport.ts  iOS / Android / no-bridge transports and origin-based selection
   stub.ts       desktop stub with native-equivalent validation
+  push.ts       host events (snapWebLensPush) behind subscription.onStatusChanged
 scripts/build.mjs   esbuild (IIFE + ESM) then tsc declarations; fails if VERSION ≠ package.json
 tests/              framework-free node tests that load dist/snap-api.js like a browser would
-examples/           one HTML page per capability, runnable against the stub; bitmoji-dance/ is the PlayCanvas one
-scripts/build-examples.mjs      copies the engine and the API into the PlayCanvas example
+examples/           one HTML page per capability, runnable against the stub; bitmoji-dance/ and bitmoji-low-poly/ use PlayCanvas
+scripts/build-examples.mjs      copies the engine and the API into the PlayCanvas examples
 scripts/fetch-default-avatar.mjs  downloads + strips the public default Bitmoji GLB
 scripts/check-lockfile.mjs        fails (or --fix rewrites) lockfile URLs outside registry.npmjs.org
 ```
 
 The tests run anywhere node does: `transport-selection.js` pins which transport each origin gets;
-`api-behaviour.js` pins the runtime contract (Android reply correlation across a double include, iOS
-synchronous-throw handling, `init()` degradation, stub fidelity); `types.js` type-checks consumer code against
+`api-behaviour.js` pins the runtime contract (Android reply correlation across a double include, `onStatusChanged`
+delivery, iOS synchronous-throw handling, `init()` degradation, stub fidelity); `types.js` type-checks consumer code against
 the built package under each module resolution, so the declarations keep matching what the package exports.
 `prepack` rebuilds `dist/` and checks the packed files, so a published tarball always matches its source.
 
