@@ -4,3 +4,7 @@ docs/
 .DS_Store
 examples/bitmoji-dance/playcanvas.min.js
 examples/bitmoji-dance/snap-api.js
+examples/bitmoji-low-poly/playcanvas.min.js
+examples/bitmoji-low-poly/snap-api.js
+examples/bitmoji-low-poly/meshopt_decoder.mjs
+examples/bitmoji-low-poly/dance.glb

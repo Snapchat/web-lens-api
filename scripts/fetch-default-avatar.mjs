@@ -6,18 +6,31 @@
 // instead of ~2 MB. Output is committed; rerun only to refresh it.
 //
 //   node scripts/fetch-default-avatar.mjs [out.glb]
+//   node scripts/fetch-default-avatar.mjs --low [out.glb]   # as Snapchat serves meshQuality/textureQuality 'low'
 
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 
+const low = process.argv.includes('--low');
+const args = process.argv.slice(2).filter(arg => arg !== '--low');
 const AVATAR_ID = '99084526856_24';
-const URL = `https://cf-st.sc-cdn.net/3d/glb/${AVATAR_ID}?atlas=false&lod=0&ua=2&usePbr=true`;
-const out = process.argv[2] || 'examples/bitmoji-dance/assets/avatar_default.glb';
+// The CDN parameters Snapchat sends for 'low' (meshopt-compressed, mesh simplified to 25%, textures to 12.5%).
+const LOW = '&meshopt=true&simplify=0.25&textureQuality=0.125';
+const URL = `https://cf-st.sc-cdn.net/3d/glb/${AVATAR_ID}?atlas=false&lod=0&ua=2&usePbr=true${low ? LOW : ''}`;
+const out = args[0] || (low ? 'examples/bitmoji-low-poly/assets/avatar_default_low.glb' : 'examples/bitmoji-dance/assets/avatar_default.glb');
 
 const res = await fetch(URL);
 if (!res.ok) throw new Error(`${URL} → HTTP ${res.status}`);
 const b = Buffer.from(await res.arrayBuffer());
 if (b.readUInt32LE(0) !== 0x46546c67) throw new Error('not a binary glTF');
+
+// The compressed buffer views can't be rewritten without decoding them, so the 'low' model is saved as served.
+if (low) {
+    mkdirSync(dirname(out), { recursive: true });
+    writeFileSync(out, b);
+    console.log(`${URL}\n  → ${out} ${(b.length / 1024).toFixed(0)} KB`);
+    process.exit(0);
+}
 
 const jsonLen = b.readUInt32LE(12);
 const j = JSON.parse(b.subarray(20, 20 + jsonLen).toString());

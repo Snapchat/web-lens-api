@@ -1,0 +1,34 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Subscription (Lens+) example</title>
+<style>body { font: 16px system-ui; padding: 24px; } button { font-size: 16px; } .locked { opacity: .4; }</style>
+
+<h1>Lens+ gated level</h1>
+<p id="level" class="locked">🔒 Level 2 — Lens+ only</p>
+<button id="upgrade" hidden>Unlock with Lens+</button>
+<p id="status"></p>
+
+<script src="../dist/snap-api.js"></script>
+<script>
+  const $ = (id) => document.getElementById(id);
+
+  function render(eligible) {
+    $('level').className = eligible ? '' : 'locked';
+    $('level').textContent = eligible ? '🔓 Level 2 — unlocked' : '🔒 Level 2 — Lens+ only';
+    $('upgrade').hidden = eligible;
+  }
+
+  snapchat.init().then(async () => {
+    if (!snapchat.isSupported('subscription')) return ($('status').textContent = 'subscription not available on this host');
+    render((await snapchat.subscription.getStatus()).eligible);
+    // Fires when the entitlement changes, even via another surface.
+    snapchat.subscription.onStatusChanged(({ eligible }) => render(eligible));
+  });
+
+  // Shows the Lens+ upsell, then the native paywall; its result is enough on its own.
+  $('upgrade').onclick = async () => {
+    const { subscribed, reason } = await snapchat.subscription.requestUpgrade();
+    $('status').textContent = subscribed ? 'subscribed 🎉' : `not subscribed (${reason || 'dismissed'})`;
+    render(subscribed);
+  };
+</script>
