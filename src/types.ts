@@ -34,13 +34,18 @@ export interface WebLensAPIErrors {
      * (the host injected no bridge). Every call rejects with it, so hide the feature.
      */
     readonly UNSUPPORTED_HOST: 'ERR_UNSUPPORTED_HOST';
+    /**
+     * API-only: a friend Bitmoji call ({@link BitmojiAPI.getFriendAvatars}, or any call passing `avatar`) ran before
+     * {@link SnapchatWebLensAPI.init} resolved. Await `init()` once at startup; nothing was sent to the host.
+     */
+    readonly NOT_INITIALIZED: 'ERR_NOT_INITIALIZED';
 }
 
 /** Union of every `ERR_*` string in {@link WebLensAPIErrors}. */
 export type WebLensAPIErrorCode = WebLensAPIErrors[keyof WebLensAPIErrors];
 
 /** Capability names, as {@link SnapchatWebLensAPI.init} reports them and {@link SnapchatWebLensAPI.isSupported} takes them. */
-export type Capability = 'leaderboards' | 'bitmoji' | 'storage' | (string & {});
+export type Capability = 'leaderboards' | 'subscription' | 'bitmoji' | 'storage' | 'haptics' | (string & {});
 
 /** Capability name → contract version, as resolved by {@link SnapchatWebLensAPI.init}. */
 export type CapabilityMap = Record<string, number>;
@@ -59,7 +64,77 @@ export interface SubmitScoreResult {
     bestScore?: number;
 }
 
-export interface Get2DAvatarParams {
+export interface SubscriptionStatus {
+    /** Whether the user can use this Lens's Lens+ content right now (see {@link SubscriptionAPI}). */
+    eligible: boolean;
+}
+
+export interface UpgradeOutcome {
+    /** Whether the user holds the entitlement once the flow terminated. */
+    subscribed: boolean;
+    /**
+     * Set when the upsell didn't complete for a reason other than the user's choice. `too_soon`: the Lens opened
+     * moments ago, and the host showed nothing; `already_in_flight`: another upsell is on screen, and the host showed
+     * nothing; `user_ineligible`: the user can't buy Lens+ in the app (for example, their subscription is managed
+     * elsewhere), and the host tells them so itself.
+     */
+    reason?: 'too_soon' | 'already_in_flight' | 'user_ineligible';
+}
+
+/** Whose Bitmoji a {@link BitmojiAPI} call serves. */
+export interface AvatarTarget {
+    /**
+     * A friend's handle from {@link BitmojiAPI.getFriendAvatars} (`bitmoji` v2). Omit it, or pass `null`, for the
+     * current user. Passing one before {@link SnapchatWebLensAPI.init} resolves rejects `ERR_NOT_INITIALIZED`; on a
+     * host below `bitmoji` v2, or from another Lens session, `ERR_INVALID_PARAMS`. It never falls back to the user.
+     * The target itself must be an object (or omitted): a bare string, or a non-string `avatar`, rejects
+     * `ERR_INVALID_PARAMS`.
+     */
+    avatar?: string | null;
+}
+
+export interface AvatarInfo {
+    /** Whether the user (or the friend named by `avatar`) has a Bitmoji. */
+    hasAvatar: boolean;
+    /**
+     * The most handles one {@link BitmojiAPI.getFriendAvatars} call returns (host-set: 20 by default, never above
+     * 50). Set by hosts serving `bitmoji` v2.
+     */
+    maxBatchCount?: number;
+}
+
+/**
+ * One friend from {@link BitmojiAPI.getFriendAvatars}. Pass it straight back as the target of the other Bitmoji
+ * calls: `get3DAvatar(friend)`, or `get2DAvatar({ ...friend, size: 'small' })`. More fields may be added later,
+ * but never one named like a call option (`size`, `variant`, or any option added later), so spreading an entry
+ * into a call's options is always safe. Pass the entry, not its handle: a bare string target rejects
+ * `ERR_INVALID_PARAMS`.
+ */
+export interface FriendAvatar {
+    /** Opaque handle for {@link AvatarTarget.avatar}, valid for this Lens session only. Never store or parse it. */
+    readonly avatar: string;
+}
+
+export interface GetFriendAvatarsParams {
+    /** How many friends to return: a whole number ≥ 1. Larger values are clamped to `maxBatchCount`. */
+    count: number;
+}
+
+/** How much detail a 3D avatar keeps: `'high'` is full quality and the default. */
+export type AvatarQuality = 'low' | 'medium' | 'high';
+
+export interface Get3DAvatarParams extends AvatarTarget {
+    /**
+     * Mesh detail. `'medium'` and `'low'` return a simplified mesh that needs `EXT_meshopt_compression`: load it
+     * with a loader that supports meshopt, such as PlayCanvas 2.24+ with `pc.meshoptInitialize`.
+     * `'high'` never uses meshopt. Defaults to `'high'`; any other value rejects `ERR_INVALID_PARAMS`.
+     */
+    meshQuality?: AvatarQuality;
+    /** Texture size: `'medium'` and `'low'` return smaller textures. Defaults to `'high'`; any other value rejects `ERR_INVALID_PARAMS`. */
+    textureQuality?: AvatarQuality;
+}
+
+export interface Get2DAvatarParams extends AvatarTarget {
     /** Variant id from {@link BitmojiAPI.getVariants}; omit for the default portrait. */
     variant?: string;
     /** Defaults to `'medium'`. */
@@ -90,6 +165,30 @@ export interface StorageInfo {
     /** `memory` for Lens Studio previews and the desktop stub. */
     persistenceMode: 'disk' | 'memory';
 }
+
+/** The feel of one {@link HapticsAPI.impact}. */
+export type ImpactStyle = 'light' | 'medium' | 'heavy' | 'soft';
+
+/** One event of a {@link HapticsAPI.pattern}. Times and durations are integer milliseconds. */
+export type HapticEvent =
+    | {
+        /** Start time from the beginning of the pattern. */
+        t: number;
+        /** A short, sharp tick. */
+        type: 'tap';
+        /** 0–1; defaults to 1. */
+        intensity?: number;
+    }
+    | {
+        /** Start time from the beginning of the pattern. */
+        t: number;
+        /** A sustained vibration. */
+        type: 'buzz';
+        /** 0–1; defaults to 1. */
+        intensity?: number;
+        /** 1–500. */
+        duration: number;
+    };
 
 /**
  * Native leaderboards (`leaderboards` capability, v1). Only Lenses configured with the leaderboard
@@ -124,8 +223,73 @@ export interface LeaderboardsAPI {
 }
 
 /**
- * The current user's own Bitmoji (`bitmoji` capability, v1). No avatar id ever crosses the bridge.
- * `participant` is a reserved parameter: every v1 action rejects it with `ERR_INVALID_PARAMS`.
+ * Lens+ entitlement for paywalled Lenses (`subscription` capability, v1). Only booleans and stable
+ * reason strings ever cross the bridge: never the provider, status, tier or expiry. Purchase runs
+ * natively; the Lens can only ask the host to present the upsell.
+ *
+ * Only a Lens+ (exclusive) Lens has Lens+ content, so a Lens that calls these methods must be one: submitting it
+ * enrolls a new Lens in Lens+, and an update can't add the calls to a Lens that isn't.
+ *
+ * On a Lens+ Lens, a user with Lens+ is eligible, and anyone else is not until they subscribe. On a Lens that isn't
+ * Lens+ exclusive, every user is eligible and `requestUpgrade()` resolves `{ subscribed: true }` without showing
+ * anything, so whatever the Lens gates on these is open to every user. That is the case:
+ *
+ * - until the Lens is live as a Lens+ Lens, some time after it passes review;
+ * - on push to device;
+ * - if the Lens stops being a Lens+ Lens;
+ * - if the submission scan found no calls, so the Lens was never enrolled. The scan looks for calls on
+ *   `snapchat.subscription` or a variable holding it, not for the namespace passed to a function.
+ */
+export interface SubscriptionAPI {
+    /**
+     * Whether the user can use this Lens's Lens+ content right now. {@link SubscriptionAPI} lists when every user can.
+     *
+     * @example
+     * ```js
+     * const { eligible } = await snapchat.subscription.getStatus();
+     * bonusLevel.locked = !eligible;
+     * ```
+     */
+    getStatus(): Promise<SubscriptionStatus>;
+    /**
+     * Shows the Lens+ upsell, then the native paywall on CTA. Resolves once the flow terminates. UI only
+     * shows on a Lens+ Lens, to a user without Lens+: a user with Lens+, or any user on a Lens that isn't Lens+
+     * exclusive, gets `{ subscribed: true }` at once. A host may instead resolve
+     * `{ subscribed: false, reason }`: when it throttles the upsell and shows nothing, or when the user can't buy
+     * Lens+ in the app. Rejects `ERR_INTERNAL` when nothing can present it.
+     *
+     * @example
+     * ```js
+     * unlockButton.onclick = async () => {
+     *     const { subscribed, reason } = await snapchat.subscription.requestUpgrade();
+     *     if (subscribed) startBonusLevel();
+     *     else if (reason) console.info('Upsell not completed:', reason); // 'too_soon' | 'already_in_flight' | 'user_ineligible'
+     * };
+     * ```
+     */
+    requestUpgrade(): Promise<UpgradeOutcome>;
+    /**
+     * Fires with `{ eligible }` whenever the entitlement changes while this Lens is active, including
+     * a subscription completed through another surface. Not every host sends these events, so rely on
+     * {@link SubscriptionAPI.requestUpgrade}'s `subscribed` and {@link SubscriptionAPI.getStatus} rather than
+     * waiting for it.
+     *
+     * @returns the unsubscribe function (one-shot).
+     * @example
+     * ```js
+     * const unsubscribe = snapchat.subscription.onStatusChanged(({ eligible }) => {
+     *     bonusLevel.locked = !eligible;
+     * });
+     * ```
+     */
+    onStatusChanged(callback: (status: SubscriptionStatus) => void): () => void;
+}
+
+/**
+ * Bitmoji avatars (`bitmoji` capability). v1 serves the current user's own Bitmoji. v2 adds friends: get opaque
+ * handles from {@link BitmojiAPI.getFriendAvatars} and pass one as `avatar` to the other calls. No avatar id,
+ * user id or name ever crosses the bridge. `participant` is a reserved parameter: the calls that take `avatar`
+ * reject it with `ERR_INVALID_PARAMS`.
  *
  * Always keep a default Bitmoji as a fallback: `hasAvatar` may be `false` and any media call may reject
  * `ERR_INTERNAL`, and a game should never show an empty character in either case. Put the fallback GLB in
@@ -142,7 +306,7 @@ export interface BitmojiAPI {
      * if (!hasAvatar) useDefaultCharacter();
      * ```
      */
-    getAvatarInfo(): Promise<{ hasAvatar: boolean }>;
+    getAvatarInfo(params?: AvatarTarget): Promise<AvatarInfo>;
     /**
      * A head-and-shoulders 2D render of the avatar: the default portrait, or one of the variants from
      * {@link BitmojiAPI.getVariants}. Rejects `ERR_INVALID_PARAMS` for a `variant` outside the current
@@ -167,6 +331,20 @@ export interface BitmojiAPI {
      * The rigged avatar GLB, with no clips: bundle your own, authored on the Bitmoji rig. Rejects
      * `ERR_INTERNAL` when the user has no Bitmoji or the model fetch fails; the URL is never empty.
      *
+     * `meshQuality` and `textureQuality` trade detail for download size, and work the same for a friend's or
+     * another player's Bitmoji. Leave them out for full quality, which every engine can load.
+     *
+     * Older Snapchat versions (before 14.33) ignore both fields and return the full model, with no error and no
+     * way to ask whether they are supported. So a Lens that requests `'medium'` or `'low'` must still load a
+     * full-size GLB, and must load a meshopt one when the host sends it. Do not rely on a size or a version check.
+     *
+     * @example
+     * ```js
+     * // Load the full-size model everywhere; ask for less only where your engine can read meshopt.
+     * const { url } = await snapchat.bitmoji.get3DAvatar({ meshQuality: 'medium', textureQuality: 'low' });
+     * const glb = await (await fetch(url)).arrayBuffer(); // meshopt-capable loader: works for both sizes
+     * ```
+     *
      * Every Bitmoji has the same rig, and it is Snap's own, not a Mixamo-style humanoid: joints are
      * named like `L_armUpper0001_bind_JNT`, and most have a child that is not a joint
      * (`L_armUpper0001_bind_JNT_SSC`) between them and the next joint. Find bones by name anywhere
@@ -186,7 +364,43 @@ export interface BitmojiAPI {
      * const glb = await (await fetch(url)).arrayBuffer(); // hand this to your engine's GLB loader
      * ```
      */
-    get3DAvatar(): Promise<MediaURL>;
+    get3DAvatar(params?: Get3DAvatarParams): Promise<MediaURL>;
+    /**
+     * Opaque handles for the user's friends who share their Bitmoji (`bitmoji` v2), to pass as `avatar` to
+     * {@link BitmojiAPI.get2DAvatar}, {@link BitmojiAPI.get3DAvatar} and {@link BitmojiAPI.getAvatarInfo}.
+     *
+     * The host takes up to `maxBatchCount` of the user's most recent eligible friends (mutual, not blocked, with a
+     * Bitmoji they share in Friendmoji), shuffles them once and keeps that list for the session: every call returns
+     * the first `count` of it, in the same order, which carries no ranking. Ask once for the most you will show.
+     * A user with few eligible friends gets a shorter list, or an empty one; it is never padded and never includes
+     * the user. Handles are valid only in the session that got them: never store one, ask again next session.
+     *
+     * When the host finds no eligible friends, or can't read the friend list (`ERR_INTERNAL`), it keeps that
+     * answer for a cooldown (30 s by default) before it looks again, so a call within the cooldown gets the same
+     * result without new work. Ask again at a natural break, such as the next round, not in a loop.
+     *
+     * Check `isSupported('bitmoji', 2)` before calling, like any capability. A call made before
+     * {@link SnapchatWebLensAPI.init} resolves rejects `ERR_NOT_INITIALIZED` without reaching the host.
+     * `ERR_INVALID_PARAMS` means a bug in the call, such as a bad `count`; `ERR_INTERNAL` means "no friends right now".
+     *
+     * @example
+     * ```js
+     * let friends = [];
+     * if (snapchat.isSupported('bitmoji', 2)) {
+     *     try {
+     *         ({ avatars: friends } = await snapchat.bitmoji.getFriendAvatars({ count: 3 }));
+     *     } catch (e) {
+     *         if (e.message !== snapchat.errors.INTERNAL) throw e; // ERR_INVALID_PARAMS: fix the call
+     *         // The friend list is unavailable right now: play solo this round.
+     *     }
+     * }
+     * for (const friend of friends) {
+     *     const { url } = await snapchat.bitmoji.get3DAvatar(friend);
+     *     spawnFriend(url);
+     * }
+     * ```
+     */
+    getFriendAvatars(params: GetFriendAvatarsParams): Promise<{ avatars: FriendAvatar[] }>;
     /**
      * The server-curated set of 2D variants: head-and-shoulders renders of the avatar, the same set the
      * native selfie picker offers. Ids are unnamed: build a visual picker by rendering each via
@@ -287,6 +501,41 @@ export interface StorageAPI {
 }
 
 /**
+ * Device vibration (`haptics` capability, v1). A haptic carries no data, so every Lens may use it. A device with no
+ * haptic hardware, or on Android 7 and lower, doesn't list the capability. Use haptics for moments the player causes,
+ * such as a hit, a landing or a win, not as a constant background effect.
+ *
+ * Both calls resolve with nothing. A call within 50 ms of the last haptic, or while a pattern plays, plays nothing, and
+ * nothing plays while haptics are off in the device settings. Bad params reject `ERR_INVALID_PARAMS`.
+ */
+export interface HapticsAPI {
+    /**
+     * One short impact.
+     *
+     * @param style - Defaults to `'medium'`.
+     * @example
+     * ```js
+     * ball.on('collision', () => snapchat.haptics.impact('heavy'));
+     * ```
+     */
+    impact(style?: ImpactStyle): Promise<void>;
+    /**
+     * A timeline of taps and buzzes: 1–16 events, `t` going up, no event starting before the last buzz ends, and
+     * everything over by 1000 ms.
+     *
+     * @example
+     * ```js
+     * // A success: a soft tap, then a strong one.
+     * await snapchat.haptics.pattern([
+     *     { t: 0, type: 'tap', intensity: 0.5 },
+     *     { t: 80, type: 'tap' }
+     * ]);
+     * ```
+     */
+    pattern(events: HapticEvent[]): Promise<void>;
+}
+
+/**
  * The `window.snapchat` singleton: one include for iOS, Android, and desktop development.
  *
  * Every call returns a Promise. Failures reject with an `Error` whose `message` is one of the
@@ -342,6 +591,8 @@ export interface SnapchatWebLensAPI {
     isSupported(capability: Capability, minVersion?: number): boolean;
 
     leaderboards: LeaderboardsAPI;
+    subscription: SubscriptionAPI;
     bitmoji: BitmojiAPI;
     storage: StorageAPI;
+    haptics: HapticsAPI;
 }

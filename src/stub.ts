@@ -11,6 +11,10 @@ type Params = Record<string, unknown>;
 type Handler = (action: string, params: Params) => Promise<unknown>;
 
 const STUB_VARIANTS = ['10226807', '20061402', '31151407', '30060626'];
+// Handles are opaque on a device; the stub's are readable so console traces stay legible. Its friends wear the
+// same placeholder media as the user, so a game shows them with its bundled default avatar.
+const STUB_FRIENDS = ['stub-friend-1', 'stub-friend-2', 'stub-friend-3'];
+const STUB_MAX_BATCH_COUNT = 20;
 // 1x1 transparent PNG: a valid `url` for <img> and fetch(), so stub code needs no branch.
 const PNG_URL =
     'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ' +
@@ -20,6 +24,8 @@ const PNG_URL =
 const GLB_URL =
     'data:model/gltf-binary;base64,Z2xURgIAAABgAAAATAAAAEpTT057ImFzc2V0Ijp7InZlcnNpb24iOiIyLjAifSwic2Nl' +
     'bmUiOjAsInNjZW5lcyI6W3sibm9kZXMiOlswXX1dLCJub2RlcyI6W3t9XX0g';
+const IMPACT_STYLES = ['light', 'medium', 'heavy', 'soft'];
+const HAPTICS_LIMITS = { maxEvents: 16, maxPatternMs: 1000, maxBuzzMs: 500 };
 const STORAGE_LIMITS = { byteLimit: 100 * 1024, keyLimit: 256, valueLimit: 32 * 1024, keyLengthLimit: 256 };
 
 const ok = (value: unknown) => Promise.resolve(value);
@@ -40,7 +46,36 @@ function hasExactly(params: Params, keys: string[]): boolean {
     return own.length === keys.length && keys.every(k => hasOwn(params, k));
 }
 
-export function createStub(): Transport {
+const isIntensity = (v: unknown) => v === undefined || (typeof v === 'number' && v >= 0 && v <= 1);
+const hasOnly = (o: Params, keys: string[]) => Object.keys(o).every(k => keys.indexOf(k) !== -1);
+
+// The pattern's length in ms, or null when the hosts would reject it.
+function patternLength(events: unknown): number | null {
+    if (!Array.isArray(events) || events.length < 1 || events.length > HAPTICS_LIMITS.maxEvents) return null;
+    let lastT = -1;
+    let end = 0;
+    for (const e of events) {
+        if (!isObject(e) || !Number.isInteger(e.t) || (e.t as number) < 0 || !isIntensity(e.intensity)) return null;
+        const t = e.t as number;
+        let duration = 0;
+        if (e.type === 'tap') {
+            if (!hasOnly(e, ['t', 'type', 'intensity'])) return null;
+        } else if (e.type === 'buzz') {
+            const d = e.duration;
+            if (!hasOnly(e, ['t', 'type', 'intensity', 'duration']) || !Number.isInteger(d) || (d as number) < 1 || (d as number) > HAPTICS_LIMITS.maxBuzzMs) return null;
+            duration = d as number;
+        } else {
+            return null;
+        }
+        if (t <= lastT || t < end) return null;
+        lastT = t;
+        end = t + duration;
+    }
+    return end <= HAPTICS_LIMITS.maxPatternMs ? end : null;
+}
+
+export function createStub(simulatePush: (capability: string, event: string, payload: unknown) => void): Transport {
+    let lensPlus = false;
     // A Map so "__proto__" behaves like any other key, as it does in the native store.
     let store = new Map<string, string>();
     let storeBytes = 0;
@@ -55,16 +90,49 @@ export function createStub(): Transport {
         return fail(errors.INVALID_PARAMS);
     };
 
+    const subscription: Handler = (action) => {
+        if (action === 'getStatus') return ok({ eligible: lensPlus });
+        if (action === 'requestUpgrade') {
+            if (lensPlus) return ok({ subscribed: true });
+            if (typeof console !== 'undefined') console.info('[snapchat stub] presenting fake upsell card (subscribes in 500ms)');
+            return new Promise((resolve) => {
+                setTimeout(() => {
+                    const flipped = !lensPlus;
+                    lensPlus = true;
+                    resolve({ subscribed: true });
+                    // Native pushes only when the entitlement actually flips — same here.
+                    if (flipped) simulatePush('subscription', 'statusChanged', { eligible: true });
+                }, 500);
+            });
+        }
+        return fail(errors.INVALID_PARAMS);
+    };
+
     const bitmoji: Handler = (action, p) => {
-        if (hasOwn(p, 'participant')) return fail(errors.INVALID_PARAMS);
-        if (action === 'getAvatarInfo') return ok({ hasAvatar: true });
+        // As on iOS, the two list calls take no target: getFriendAvatars reads only `count`, getVariants nothing.
+        if (action === 'getFriendAvatars') {
+            const count = p.count;
+            if (typeof count !== 'number' || !Number.isInteger(count) || count < 1) return fail(errors.INVALID_PARAMS);
+            return ok({ avatars: STUB_FRIENDS.slice(0, Math.min(count, STUB_MAX_BATCH_COUNT)).map(avatar => ({ avatar })) });
+        }
         if (action === 'getVariants') return ok({ variants: STUB_VARIANTS.slice() });
+        if (hasOwn(p, 'participant')) return fail(errors.INVALID_PARAMS);
+        const avatar = p.avatar;
+        if (avatar !== undefined && avatar !== null && STUB_FRIENDS.indexOf(avatar as string) === -1) return fail(errors.INVALID_PARAMS);
+        if (action === 'getAvatarInfo') return ok({ hasAvatar: true, maxBatchCount: STUB_MAX_BATCH_COUNT });
         if (action === 'get2DAvatar') {
             if (p.variant !== undefined && STUB_VARIANTS.indexOf(p.variant as string) === -1) return fail(errors.INVALID_PARAMS);
             if (p.size !== undefined && ['small', 'normal', 'large'].indexOf(p.size as string) === -1) return fail(errors.INVALID_PARAMS);
             return ok({ url: PNG_URL });
         }
-        if (action === 'get3DAvatar') return ok({ url: GLB_URL });
+        if (action === 'get3DAvatar') {
+            const levels = ['low', 'medium', 'high'];
+            for (const key of ['meshQuality', 'textureQuality']) {
+                const level = p[key];
+                if (level !== undefined && level !== null && levels.indexOf(level as string) === -1) return fail(errors.INVALID_PARAMS);
+            }
+            return ok({ url: GLB_URL });
+        }
         return fail(errors.INVALID_PARAMS);
     };
 
@@ -121,14 +189,28 @@ export function createStub(): Transport {
         }
     };
 
+    // Nothing vibrates on a desktop; only the params are checked.
+    const haptics: Handler = (action, p) => {
+        let length: number | null = null;
+        if (action === 'impact') {
+            if (hasOnly(p, ['style']) && (p.style === undefined || IMPACT_STYLES.indexOf(p.style as string) !== -1)) length = 0;
+        } else if (action === 'pattern') {
+            if (hasExactly(p, ['events'])) length = patternLength(p.events);
+        }
+        if (length === null) return fail(errors.INVALID_PARAMS);
+        return ok({});
+    };
+
     const capabilities: Record<string, Handler> = {
         sdk: (action) => {
             if (action !== 'getCapabilities') return fail(errors.INVALID_PARAMS);
-            return ok({ capabilities: { leaderboards: 1, bitmoji: 1, games_storage: 1 } });
+            return ok({ capabilities: { leaderboards: 1, subscription: 1, bitmoji: 2, games_storage: 1, haptics: 1 } });
         },
         leaderboards,
+        subscription,
         bitmoji,
-        games_storage: storage
+        games_storage: storage,
+        haptics
     };
 
     return (message: BridgeMessage) => {

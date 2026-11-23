@@ -1,0 +1,64 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Friends' Bitmoji example</title>
+<style>body { font: 16px system-ui; padding: 24px; } img { height: 96px; margin: 4px; background: #eee; border-radius: 8px; } button { font-size: 16px; }</style>
+
+<h1>Play with your friends</h1>
+<div id="friends"></div>
+<button id="again" disabled>Next round</button>
+<p id="status"></p>
+
+<script src="../dist/snap-api.js"></script>
+<script>
+  const $ = (id) => document.getElementById(id);
+  const COUNT = 3;
+
+  function img(url) {
+    const el = new Image(); el.src = url; $('friends').appendChild(el);
+  }
+
+  // Each friend is { avatar: handle }: pass it straight back, never store or parse the handle (this session only).
+  async function showRound() {
+    $('friends').textContent = '';
+    let avatars = [];
+    try {
+      ({ avatars } = await snapchat.bitmoji.getFriendAvatars({ count: COUNT }));
+    } catch (e) {
+      // Support was checked at startup, so ERR_INVALID_PARAMS is a bug in the call, not a missing feature.
+      if (e.message !== snapchat.errors.INTERNAL) throw e;
+      return ($('status').textContent = 'friend list unavailable right now: play solo this round');
+    }
+    // Never padded: fewer friends than asked for (or none) is normal, so fill the rest with your own characters.
+    let shown = 0;
+    for (const friend of avatars) {
+      try {
+        img((await snapchat.bitmoji.get2DAvatar({ ...friend, size: 'small' })).url);
+        shown++;
+      } catch (e) {
+        console.warn('Skipping a friend:', e.message); // one friend failing doesn't end the round
+      }
+    }
+    $('status').textContent = avatars.length
+      ? `${shown} of ${COUNT} friends, the same ones every round this session`
+      // An empty answer is kept for a cooldown (~30 s) before the host looks again: ask next round, not in a loop.
+      : 'no friends who share their Bitmoji yet: play solo';
+  }
+
+  // One round at a time, so two rounds never fill the row together.
+  async function showFriends() {
+    $('again').disabled = true;
+    try {
+      await showRound();
+    } finally {
+      $('again').disabled = false;
+    }
+  }
+
+  snapchat.init().then(async () => {
+    if (!snapchat.isSupported('bitmoji', 2)) return ($('status').textContent = 'friend Bitmoji not available: play solo');
+    const { maxBatchCount } = await snapchat.bitmoji.getAvatarInfo();
+    console.info(`up to ${maxBatchCount} friends per call`);
+    $('again').onclick = showFriends;
+    await showFriends();
+  });
+</script>

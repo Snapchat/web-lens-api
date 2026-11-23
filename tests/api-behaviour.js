@@ -34,7 +34,8 @@ function makeWindow(location) {
         dispatchEvent(event) {
             (handlers[event.type] || []).forEach(fn => fn(event));
             return true;
-        }
+        },
+        MessageEvent
     };
     win.window = win;
     return win;
@@ -112,6 +113,32 @@ test('Android: init() degrades to {} when the host does not know sdk/getCapabili
     assert.strictEqual(sdk.isSupported('leaderboards'), false);
 });
 
+test('Android: requestUpgrade() resolves the host\'s { subscribed } as is', async () => {
+    const sent = [];
+    const listeners = [];
+    const win = makeWindow({ protocol: 'https:', hostname: 'wlabc.web-lens.snap.local' });
+    win.snapWebLensBridge = {
+        postMessage(m) {
+            sent.push(JSON.parse(m));
+        },
+        addEventListener(_type, fn) {
+            listeners.push(fn);
+        }
+    };
+    const sdk = load(win);
+    const reply = (payload) => {
+        const { requestId } = sent[sent.length - 1];
+        listeners.forEach(fn => fn({ data: JSON.stringify({ requestId, ok: true, payload }) }));
+    };
+    const init = sdk.init();
+    reply({ capabilities: { subscription: 1 } });
+    assert.deepStrictEqual(await init, { subscription: 1 });
+    const upgrade = sdk.subscription.requestUpgrade();
+    assert.deepStrictEqual(sent[sent.length - 1], { requestId: sent[sent.length - 1].requestId, uri: 'app://subscription/requestUpgrade', params: {} });
+    reply({ subscribed: false });
+    assert.deepStrictEqual(await upgrade, { subscribed: false });
+});
+
 test('Android: postMessage throwing rejects ERR_INTERNAL instead of hanging', async () => {
     const win = makeWindow({ protocol: 'https:', hostname: 'wlabc.web-lens.snap.local' });
     win.snapWebLensBridge = {
@@ -158,6 +185,59 @@ test('iOS: native rejections surface as ERR_* codes only', async () => {
     assert.strictEqual(sdk.isSupported('leaderboards', 2), false);
     assert.strictEqual(sdk.isSupported('leaderboards', 0), true);
     assert.strictEqual(sdk.isSupported('toString'), false);
+});
+
+test('iOS: onStatusChanged primes native observation with one getStatus call', async () => {
+    const win = makeWindow({ protocol: 'weblens:', hostname: 'lens' });
+    const uris = [];
+    const bridge = {
+        postMessage(m) {
+            uris.push(m.uri);
+            return Promise.resolve(m.uri.endsWith('getCapabilities') ? { capabilities: { subscription: 1 } } : { eligible: false });
+        }
+    };
+    win.webkit = { messageHandlers: { snapWebLensBridge: bridge } };
+    const sdk = load(win);
+    await sdk.init();
+    sdk.subscription.onStatusChanged(() => {});
+    sdk.subscription.onStatusChanged(() => {});
+    assert.deepStrictEqual(uris, ['app://sdk/getCapabilities', 'app://subscription/getStatus']);
+});
+
+test('iOS: onStatusChanged primes native observation even before init() resolves', () => {
+    const win = makeWindow({ protocol: 'weblens:', hostname: 'lens' });
+    const uris = [];
+    const bridge = {
+        postMessage(m) {
+            uris.push(m.uri);
+            return Promise.resolve({ eligible: false });
+        }
+    };
+    win.webkit = { messageHandlers: { snapWebLensBridge: bridge } };
+    load(win).subscription.onStatusChanged(() => {});
+    assert.deepStrictEqual(uris, ['app://subscription/getStatus']);
+});
+
+test('iOS: a throttled requestUpgrade() resolves { subscribed: false, reason }', async () => {
+    const win = makeWindow({ protocol: 'weblens:', hostname: 'lens' });
+    const bridge = {
+        postMessage() {
+            return Promise.resolve({ subscribed: false, reason: 'too_soon' });
+        }
+    };
+    win.webkit = { messageHandlers: { snapWebLensBridge: bridge } };
+    assert.deepStrictEqual(await load(win).subscription.requestUpgrade(), { subscribed: false, reason: 'too_soon' });
+});
+
+test('requestUpgrade() keeps the host\'s reason, and drops ineligibility_type', async () => {
+    const win = makeWindow({ protocol: 'weblens:', hostname: 'lens' });
+    const bridge = {
+        postMessage() {
+            return Promise.resolve({ subscribed: false, reason: 'user_ineligible', ineligibility_type: 'gifted' });
+        }
+    };
+    win.webkit = { messageHandlers: { snapWebLensBridge: bridge } };
+    assert.deepStrictEqual(await load(win).subscription.requestUpgrade(), { subscribed: false, reason: 'user_ineligible' });
 });
 
 test('iOS: the host\'s games_storage capability is storage in the API, and still games_storage on the wire', async () => {
@@ -234,11 +314,167 @@ test('iOS: get2DAvatar() sends medium as the host\'s normal', async () => {
     assert.strictEqual(sent.length, 3, 'a rejected size never reaches the host');
 });
 
+function iosHost(capabilities, reply = () => ({ url: 'blob:x' })) {
+    const win = makeWindow({ protocol: 'weblens:', hostname: 'lens' });
+    const sent = [];
+    win.webkit = { messageHandlers: { snapWebLensBridge: { postMessage(m) {
+        sent.push(m);
+        return Promise.resolve(m.uri === 'app://sdk/getCapabilities' ? { capabilities } : reply(m));
+    } } } };
+    return { sdk: load(win), sent: () => sent.filter(m => m.uri !== 'app://sdk/getCapabilities') };
+}
+
+test('get3DAvatar sends meshQuality and textureQuality with the target, and nothing else', async () => {
+    const { sdk, sent } = iosHost({ bitmoji: 2 }, () => ({ url: 'blob:x' }));
+    await sdk.init();
+    await sdk.bitmoji.get3DAvatar({ avatar: 'h1', meshQuality: 'low', textureQuality: 'medium', extra: 1 });
+    await sdk.bitmoji.get3DAvatar({ meshQuality: 'high' });
+    assert.deepStrictEqual(sent().map(m => [m.uri, m.params]), [
+        ['app://bitmoji/get3DAvatar', { avatar: 'h1', meshQuality: 'low', textureQuality: 'medium' }],
+        ['app://bitmoji/get3DAvatar', { meshQuality: 'high' }]
+    ]);
+});
+
+test('iOS: friend avatars send only count, and pass the handle as avatar, and only avatar, to every media call', async () => {
+    const { sdk, sent } = iosHost({ bitmoji: 2 }, m => (m.uri === 'app://bitmoji/getFriendAvatars' ? { avatars: [{ avatar: 'h1' }] } : { url: 'blob:x' }));
+    await sdk.init();
+    assert.deepStrictEqual(await sdk.bitmoji.getFriendAvatars({ count: 3, participant: 'p1', avatar: 'h1' }), { avatars: [{ avatar: 'h1' }] });
+    await sdk.bitmoji.get3DAvatar({ avatar: 'h1', extra: 1 });
+    await sdk.bitmoji.get2DAvatar({ avatar: 'h1', size: 'medium', extra: 1 });
+    await sdk.bitmoji.getAvatarInfo({ avatar: null });
+    await sdk.bitmoji.get3DAvatar();
+    assert.deepStrictEqual(sent().map(m => [m.uri, m.params]), [
+        ['app://bitmoji/getFriendAvatars', { count: 3 }],
+        ['app://bitmoji/get3DAvatar', { avatar: 'h1' }],
+        ['app://bitmoji/get2DAvatar', { avatar: 'h1', size: 'normal' }],
+        ['app://bitmoji/getAvatarInfo', { avatar: null }],
+        ['app://bitmoji/get3DAvatar', {}]
+    ]);
+});
+
+test('iOS: a bare-string friend list arrives as { avatar } objects, extra fields kept', async () => {
+    const { sdk } = iosHost({ bitmoji: 2 }, () => ({ avatars: ['h1', { avatar: 'h2', future: true }, 42, null, { nope: 1 }] }));
+    await sdk.init();
+    assert.deepStrictEqual(await sdk.bitmoji.getFriendAvatars({ count: 3 }), { avatars: [{ avatar: 'h1' }, { avatar: 'h2', future: true }] });
+});
+
+test('iOS: a friend entry passes straight back as the target, and only its avatar reaches the host', async () => {
+    const { sdk, sent } = iosHost({ bitmoji: 2 });
+    await sdk.init();
+    const friend = { avatar: 'h1', future: true };
+    await sdk.bitmoji.get3DAvatar(friend);
+    await sdk.bitmoji.get2DAvatar({ ...friend, size: 'small' });
+    assert.deepStrictEqual(sent().map(m => m.params), [{ avatar: 'h1' }, { avatar: 'h1', size: 'small' }]);
+});
+
+test('iOS: a bare handle, a non-object target or a non-string avatar rejects before reaching the host', async () => {
+    const { sdk, sent } = iosHost({ bitmoji: 2 });
+    await sdk.init();
+    for (const target of ['h1', 42, true, ['h1'], { avatar: { avatar: 'h1' } }, { avatar: 7 }]) {
+        await rejectsWith(sdk.bitmoji.get3DAvatar(target), 'ERR_INVALID_PARAMS');
+        await rejectsWith(sdk.bitmoji.get2DAvatar(target), 'ERR_INVALID_PARAMS');
+        await rejectsWith(sdk.bitmoji.getAvatarInfo(target), 'ERR_INVALID_PARAMS');
+    }
+    assert.deepStrictEqual(sent(), [], 'nothing is sent, so a slip never answers with the user');
+    await sdk.bitmoji.get3DAvatar();
+    await sdk.bitmoji.get3DAvatar(null);
+    await sdk.bitmoji.get2DAvatar({ size: 'small' });
+    assert.deepStrictEqual(sent().map(m => m.params), [{}, {}, { size: 'small' }], 'no target still means the user');
+});
+
+test('iOS: a friend handle never reaches a bitmoji v1 host, which would answer with the current user', async () => {
+    const { sdk, sent } = iosHost({ bitmoji: 1 });
+    await sdk.init();
+    await rejectsWith(sdk.bitmoji.get3DAvatar({ avatar: 'h1' }), 'ERR_INVALID_PARAMS');
+    await rejectsWith(sdk.bitmoji.get2DAvatar({ avatar: 'h1' }), 'ERR_INVALID_PARAMS');
+    await rejectsWith(sdk.bitmoji.getAvatarInfo({ avatar: 'h1' }), 'ERR_INVALID_PARAMS');
+    await sdk.bitmoji.get3DAvatar({ avatar: null });
+    assert.deepStrictEqual(sent().map(m => m.params), [{ avatar: null }]);
+});
+
+test('iOS: a friend handle sent before init() rejects ERR_NOT_INITIALIZED and reaches no host, whatever its bitmoji version', async () => {
+    for (const bitmoji of [1, 2]) {
+        const { sdk, sent } = iosHost({ bitmoji });
+        await rejectsWith(sdk.bitmoji.get3DAvatar({ avatar: 'h1' }), 'ERR_NOT_INITIALIZED');
+        await rejectsWith(sdk.bitmoji.get2DAvatar({ avatar: 'h1', size: 'small' }), 'ERR_NOT_INITIALIZED');
+        await rejectsWith(sdk.bitmoji.getAvatarInfo({ avatar: 'h1' }), 'ERR_NOT_INITIALIZED');
+        await rejectsWith(sdk.bitmoji.getFriendAvatars({ count: 3 }), 'ERR_NOT_INITIALIZED');
+        assert.deepStrictEqual(sent(), [], 'nothing is sent, and init() is not called behind the Lens\'s back');
+        assert.strictEqual(sdk.isSupported('bitmoji'), false);
+    }
+});
+
+test('iOS: before init() every call but the friend ones still reaches the host', async () => {
+    const { sdk, sent } = iosHost({ bitmoji: 1, leaderboards: 1, subscription: 1, games_storage: 1 }, () => ({}));
+    await sdk.bitmoji.getAvatarInfo();
+    await sdk.bitmoji.get2DAvatar({ size: 'small' });
+    await sdk.bitmoji.get3DAvatar({ avatar: null });
+    await sdk.bitmoji.getVariants();
+    await sdk.leaderboards.submitScore({ score: 1 });
+    await sdk.leaderboards.show();
+    await sdk.subscription.getStatus();
+    await sdk.storage.get('save');
+    assert.deepStrictEqual(sent().map(m => m.uri), [
+        'app://bitmoji/getAvatarInfo', 'app://bitmoji/get2DAvatar', 'app://bitmoji/get3DAvatar', 'app://bitmoji/getVariants',
+        'app://leaderboards/submitScore', 'app://leaderboards/present', 'app://subscription/getStatus', 'app://games_storage/get'
+    ]);
+});
+
+test('stub: a bare handle as the target rejects on the desktop too', async () => {
+    const sdk = load(makeWindow({ protocol: 'http:', hostname: 'localhost' }));
+    await sdk.init();
+    const { avatars } = await sdk.bitmoji.getFriendAvatars({ count: 1 });
+    await rejectsWith(sdk.bitmoji.get3DAvatar(avatars[0].avatar), 'ERR_INVALID_PARAMS');
+    assert.ok((await sdk.bitmoji.get3DAvatar(avatars[0])).url.startsWith('data:model/gltf-binary'));
+});
+
+test('stub: a friend handle before init() rejects there too, so the missing init() shows up on the desktop', async () => {
+    const sdk = load(makeWindow({ protocol: 'http:', hostname: 'localhost' }));
+    await rejectsWith(sdk.bitmoji.get3DAvatar({ avatar: 'stub-friend-1' }), 'ERR_NOT_INITIALIZED');
+    await rejectsWith(sdk.bitmoji.getFriendAvatars({ count: 1 }), 'ERR_NOT_INITIALIZED');
+    await sdk.init();
+    assert.ok((await sdk.bitmoji.get3DAvatar({ avatar: 'stub-friend-1' })).url.startsWith('data:model/gltf-binary'));
+});
+
 test('Lens host without a bridge: init() resolves {} and calls reject ERR_UNSUPPORTED_HOST', async () => {
     const sdk = load(makeWindow({ protocol: 'weblens:', hostname: 'lens' }));
     assert.strictEqual(sdk.isStub, false);
     assert.deepStrictEqual(await sdk.init(), {});
     await rejectsWith(sdk.bitmoji.getAvatarInfo(), 'ERR_UNSUPPORTED_HOST');
+    await rejectsWith(sdk.subscription.getStatus(), 'ERR_UNSUPPORTED_HOST');
+});
+
+// What the iOS host dispatches for subscription's statusChanged.
+function statusChanged(win, payload) {
+    win.dispatchEvent(new win.MessageEvent('snapWebLensPush', { data: { capability: 'subscription', event: 'statusChanged', json: JSON.stringify(payload) } }));
+}
+
+test('onStatusChanged: a throwing listener does not starve the others; unsubscribe is one-shot', () => {
+    const win = makeWindow({ protocol: 'http:', hostname: 'localhost' });
+    const sdk = load(win);
+    const seen = [];
+    const off = sdk.subscription.onStatusChanged(() => {
+        throw new Error('boom');
+    });
+    sdk.subscription.onStatusChanged(s => seen.push(s.eligible));
+    statusChanged(win, { eligible: true });
+    assert.deepStrictEqual(seen, [true]);
+    off();
+    off();
+    statusChanged(win, { eligible: false });
+    assert.deepStrictEqual(seen, [true, false]);
+    assert.throws(() => sdk.subscription.onStatusChanged('not a function'), TypeError);
+});
+
+test('onStatusChanged: malformed or unaddressed host events are ignored', () => {
+    const win = makeWindow({ protocol: 'http:', hostname: 'localhost' });
+    const sdk = load(win);
+    const seen = [];
+    sdk.subscription.onStatusChanged(s => seen.push(s));
+    win.dispatchEvent(new win.MessageEvent('snapWebLensPush', { data: { capability: 'subscription', event: 'statusChanged', json: '{not json' } }));
+    win.dispatchEvent(new win.MessageEvent('snapWebLensPush', { data: { capability: 'other', event: 'statusChanged', json: '{}' } }));
+    win.dispatchEvent(new win.MessageEvent('snapWebLensPush', { data: null }));
+    assert.deepStrictEqual(seen, []);
 });
 
 test('global: window.snapchat is the API and window.SnapSDK is a deprecated alias of the same object', () => {
@@ -246,20 +482,27 @@ test('global: window.snapchat is the API and window.SnapSDK is a deprecated alia
     const api = load(win);
     assert.strictEqual(win.snapchat, api);
     assert.strictEqual(win.SnapSDK, api);
-    assert.strictEqual(api.version, '0.1.3');
+    assert.strictEqual(api.version, '0.2.0');
+});
+
+test('global: the API adds only the subscription and haptics namespaces to 0.1.2, and no push surface', () => {
+    const api = load(makeWindow({ protocol: 'http:', hostname: 'localhost' }));
+    assert.deepStrictEqual(Object.keys(api), ['version', 'errors', 'isStub', 'init', 'isSupported', 'leaderboards', 'subscription', 'bitmoji', 'storage', 'haptics']);
+    assert.deepStrictEqual(Object.keys(api.subscription), ['getStatus', 'requestUpgrade', 'onStatusChanged']);
+    assert.ok(!('isPushSupported' in api) && !('__simulatePush' in api));
 });
 
 test('stub: errors are frozen and every code is exposed', () => {
     const sdk = load(makeWindow({ protocol: 'http:', hostname: 'localhost' }));
     assert.ok(Object.isFrozen(sdk.errors));
     assert.deepStrictEqual(Object.keys(sdk.errors).sort(), [
-        'INTERNAL', 'INVALID_PARAMS', 'MALFORMED_REQUEST', 'QUOTA_EXCEEDED', 'STORAGE_UNAVAILABLE', 'UNKNOWN_CAPABILITY', 'UNSUPPORTED_HOST'
+        'INTERNAL', 'INVALID_PARAMS', 'MALFORMED_REQUEST', 'NOT_INITIALIZED', 'QUOTA_EXCEEDED', 'STORAGE_UNAVAILABLE', 'UNKNOWN_CAPABILITY', 'UNSUPPORTED_HOST'
     ]);
 });
 
 test('stub: leaderboards validate like native and echo the submitted score', async () => {
     const sdk = load(makeWindow({ protocol: 'http:', hostname: 'localhost' }));
-    assert.deepStrictEqual(await sdk.init(), { leaderboards: 1, bitmoji: 1, storage: 1 });
+    assert.deepStrictEqual(await sdk.init(), { leaderboards: 1, subscription: 1, bitmoji: 2, storage: 1, haptics: 1 });
     const r = await sdk.leaderboards.submitScore({ score: 42, ordering: 'ascending' });
     assert.deepStrictEqual(r, { bestScore: 42 });
     await rejectsWith(sdk.leaderboards.submitScore({}), 'ERR_INVALID_PARAMS');
@@ -268,7 +511,37 @@ test('stub: leaderboards validate like native and echo the submitted score', asy
     assert.strictEqual(await sdk.leaderboards.show(), undefined);
 });
 
-test('stub: bitmoji rejects participant everywhere, validates variant/size, never serves an empty url', async () => {
+test('stub: subscription flips once and fires onStatusChanged only on the change', async () => {
+    const sdk = load(makeWindow({ protocol: 'http:', hostname: 'localhost' }));
+    const pushes = [];
+    sdk.subscription.onStatusChanged(s => pushes.push(s.eligible));
+    assert.deepStrictEqual(await sdk.subscription.getStatus(), { eligible: false });
+    assert.deepStrictEqual(await sdk.subscription.requestUpgrade(), { subscribed: true });
+    assert.deepStrictEqual(await sdk.subscription.requestUpgrade(), { subscribed: true });
+    assert.deepStrictEqual(await sdk.subscription.getStatus(), { eligible: true });
+    assert.deepStrictEqual(pushes, [true]);
+});
+
+test('stub: concurrent requestUpgrade() calls fire onStatusChanged once', async () => {
+    const sdk = load(makeWindow({ protocol: 'http:', hostname: 'localhost' }));
+    const pushes = [];
+    sdk.subscription.onStatusChanged(s => pushes.push(s.eligible));
+    const outcomes = await Promise.all([sdk.subscription.requestUpgrade(), sdk.subscription.requestUpgrade()]);
+    assert.deepStrictEqual(outcomes, [{ subscribed: true }, { subscribed: true }]);
+    assert.deepStrictEqual(pushes, [true]);
+});
+
+test('stub: get3DAvatar validates meshQuality and textureQuality', async () => {
+    const sdk = load(makeWindow({ protocol: 'http:', hostname: 'localhost' }));
+    for (const bad of [{ meshQuality: 'normal' }, { textureQuality: 123 }, { meshQuality: '' }]) {
+        await rejectsWith(sdk.bitmoji.get3DAvatar(bad), 'ERR_INVALID_PARAMS');
+    }
+    for (const ok of [{}, { meshQuality: null }, { meshQuality: 'low', textureQuality: 'medium' }, { textureQuality: 'high' }]) {
+        assert.ok((await sdk.bitmoji.get3DAvatar(ok)).url);
+    }
+});
+
+test('stub: bitmoji rejects participant on media calls, validates variant/size, never serves an empty url', async () => {
     const sdk = load(makeWindow({ protocol: 'http:', hostname: 'localhost' }));
     const { variants } = await sdk.bitmoji.getVariants();
     assert.ok(variants.length > 0);
@@ -280,6 +553,74 @@ test('stub: bitmoji rejects participant everywhere, validates variant/size, neve
     // The hosts' own name for the middle size is not an alias.
     await rejectsWith(sdk.bitmoji.get2DAvatar({ size: 'normal' }), 'ERR_INVALID_PARAMS');
     await rejectsWith(sdk.bitmoji.get2DAvatar({ participant: 'p1' }), 'ERR_INVALID_PARAMS');
+    await rejectsWith(sdk.bitmoji.get3DAvatar({ participant: 'p1' }), 'ERR_INVALID_PARAMS');
+    await rejectsWith(sdk.bitmoji.getAvatarInfo({ participant: 'p1' }), 'ERR_INVALID_PARAMS');
+    // Like iOS, getFriendAvatars reads only count (after init(), which friend calls require).
+    await sdk.init();
+    assert.deepStrictEqual(await sdk.bitmoji.getFriendAvatars({ count: 2, participant: 'p1' }), { avatars: [{ avatar: 'stub-friend-1' }, { avatar: 'stub-friend-2' }] });
+});
+
+test('stub: bitmoji v2 serves fixed friend handles that resolve as avatar, and validates count and handles', async () => {
+    const sdk = load(makeWindow({ protocol: 'http:', hostname: 'localhost' }));
+    await sdk.init();
+    assert.ok(sdk.isSupported('bitmoji', 2));
+    assert.deepStrictEqual(await sdk.bitmoji.getAvatarInfo(), { hasAvatar: true, maxBatchCount: 20 });
+    const { avatars } = await sdk.bitmoji.getFriendAvatars({ count: 2 });
+    assert.strictEqual(avatars.length, 2);
+    assert.deepStrictEqual((await sdk.bitmoji.getFriendAvatars({ count: 2 })).avatars, avatars, 'same list every call');
+    assert.strictEqual((await sdk.bitmoji.getFriendAvatars({ count: 50 })).avatars.length, 3, 'never padded');
+    assert.deepStrictEqual(await sdk.bitmoji.getAvatarInfo(avatars[0]), { hasAvatar: true, maxBatchCount: 20 });
+    assert.ok((await sdk.bitmoji.get2DAvatar({ ...avatars[0], size: 'small' })).url.startsWith('data:image/png'));
+    assert.ok((await sdk.bitmoji.get3DAvatar(avatars[1])).url.startsWith('data:model/gltf-binary'));
+    for (const count of [0, -1, 1.5, '2', undefined]) await rejectsWith(sdk.bitmoji.getFriendAvatars({ count }), 'ERR_INVALID_PARAMS');
+    await rejectsWith(sdk.bitmoji.get3DAvatar({ avatar: 'not-a-handle' }), 'ERR_INVALID_PARAMS');
+});
+
+test('iOS: haptics sends impact and pattern params as given, and an absent style as no params', async () => {
+    const win = makeWindow({ protocol: 'weblens:', hostname: 'lens' });
+    const log = [];
+    win.webkit = { messageHandlers: { snapWebLensBridge: { postMessage(m) {
+        log.push(m);
+        return Promise.resolve(m.uri === 'app://sdk/getCapabilities' ? { capabilities: { haptics: 1 } } : { played: true });
+    } } } };
+    const sdk = load(win);
+    const sent = () => log.filter(m => m.uri !== 'app://sdk/getCapabilities');
+    await sdk.init();
+    assert.ok(sdk.isSupported('haptics'));
+    assert.strictEqual(await sdk.haptics.impact(), undefined, 'the host reply is not passed on');
+    await sdk.haptics.impact('heavy');
+    await sdk.haptics.pattern([{ t: 0, type: 'tap' }, { t: 100, type: 'buzz', duration: 200, intensity: 0.5 }]);
+    assert.deepStrictEqual(sent().map(m => [m.uri, m.params]), [
+        ['app://haptics/impact', {}],
+        ['app://haptics/impact', { style: 'heavy' }],
+        ['app://haptics/pattern', { events: [{ t: 0, type: 'tap' }, { t: 100, type: 'buzz', duration: 200, intensity: 0.5 }] }]
+    ]);
+});
+
+test('stub: haptics validates like native and resolves with nothing', async () => {
+    const sdk = load(makeWindow({ protocol: 'http:', hostname: 'localhost' }));
+    assert.strictEqual((await sdk.init()).haptics, 1);
+    assert.strictEqual(await sdk.haptics.impact(), undefined);
+    assert.strictEqual(await sdk.haptics.impact('light'), undefined);
+    assert.strictEqual(await sdk.haptics.pattern([{ t: 0, type: 'buzz', duration: 120 }]), undefined);
+    const invalid = [
+        ['rigid'],
+        [[]],
+        [Array.from({ length: 17 }, (_, i) => ({ t: i * 10, type: 'tap' }))],
+        [[{ t: 0, type: 'tap', duration: 10 }]],
+        [[{ t: 0, type: 'buzz' }]],
+        [[{ t: 0, type: 'buzz', duration: 501 }]],
+        [[{ t: 0, type: 'buzz', duration: 100 }, { t: 50, type: 'tap' }]],
+        [[{ t: 10, type: 'tap' }, { t: 10, type: 'tap' }]],
+        [[{ t: 0.5, type: 'tap' }]],
+        [[{ t: 0, type: 'tap', intensity: 2 }]],
+        [[{ t: 0, type: 'pulse' }]],
+        [[{ t: 900, type: 'buzz', duration: 200 }]]
+    ];
+    for (const [arg] of invalid) {
+        const call = typeof arg === 'string' ? sdk.haptics.impact(arg) : sdk.haptics.pattern(arg);
+        await rejectsWith(call, 'ERR_INVALID_PARAMS');
+    }
 });
 
 test('stub: storage round-trips JSON, enforces limits, reports info', async () => {

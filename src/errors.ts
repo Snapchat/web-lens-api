@@ -11,7 +11,8 @@ export const errors: WebLensAPIErrors = Object.freeze({
     INTERNAL: 'ERR_INTERNAL',
     QUOTA_EXCEEDED: 'ERR_QUOTA_EXCEEDED',
     STORAGE_UNAVAILABLE: 'ERR_STORAGE_UNAVAILABLE',
-    UNSUPPORTED_HOST: 'ERR_UNSUPPORTED_HOST'
+    UNSUPPORTED_HOST: 'ERR_UNSUPPORTED_HOST',
+    NOT_INITIALIZED: 'ERR_NOT_INITIALIZED'
 } as const);
 
 export function bridgeError(code: string): Error {
