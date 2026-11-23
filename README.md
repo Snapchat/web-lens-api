@@ -50,8 +50,8 @@ if (snapchat.isSupported('leaderboards')) {
 
 if (snapchat.isSupported('subscription')) {
   const { eligible } = await snapchat.subscription.getStatus();   // gate Lens+ content on this
-  const outcome = await snapchat.subscription.requestUpgrade();   // Lens+ upsell → native paywall
-  // Fires when the entitlement changes while the Lens is active, e.g. a subscription made elsewhere.
+  const outcome = await snapchat.subscription.requestUpgrade();   // Lens+ upgrade offer → Snapchat's paywall
+  // Fires when the user's Lens+ status changes while the Lens is open, e.g. after subscribing elsewhere.
   const unsubscribe = snapchat.subscription.onStatusChanged(({ eligible }) => { /* react */ });
 }
 
@@ -92,6 +92,90 @@ working on newer hosts.
 
 The `examples/` folder in the source repository has one runnable page per capability (not part of the npm package). Full reference docs are
 generated from the source with `npm run build:docs` (see [Development](#development)).
+
+## Lens+
+
+Lens+ is a Snapchat subscription. With the `subscription` capability, a Web Lens can put some of its content, such as
+a bonus level, behind Lens+: your game checks whether the user can use that content and, if they can't, asks
+Snapchat to show the Lens+ upgrade offer. Snapchat runs the payment. Your game gets only yes-or-no answers and a
+`reason` code: never the price, plan or payment details, and it can't take a payment itself.
+
+### The three calls
+
+| Call | What it does |
+|---|---|
+| `getStatus()` | Resolves `{ eligible }`: whether the user can use this Lens's Lens+ content right now. Lock the content when it's `false`. |
+| `requestUpgrade()` | Shows the Lens+ upgrade offer, then Snapchat's paywall if the user taps through. Resolves `{ subscribed }` when they're done: whether they have Lens+ now. |
+| `onStatusChanged(callback)` | Calls back with `{ eligible }` when the user's Lens+ status changes while the Lens is open, such as after subscribing in another Lens or in Settings. Returns a function that stops listening. Not every Snapchat version sends it, so unlock on the result of `requestUpgrade()`. |
+
+When the upgrade offer didn't complete for a reason other than the user's choice, `requestUpgrade()` also returns a
+`reason`:
+
+| `reason` | Meaning |
+|---|---|
+| `too_soon` | It was called too soon after the Lens opened. Snapchat showed nothing, so try again a little later. |
+| `already_in_flight` | Another upgrade offer is on screen. Snapchat showed nothing. |
+| `user_ineligible` | The user can't buy Lens+ in the app, for example because their subscription is managed elsewhere. Snapchat tells them so. |
+
+It rejects with `ERR_INTERNAL` when nothing could show the offer.
+
+### Who can use your Lens+ content
+
+Snapchat decides who is eligible, not your game, and it locks Lens+ content only on a Lens+ Lens. On a Lens+ Lens, only
+users with Lens+ are eligible. On any other Lens, every user is eligible, and `requestUpgrade()` resolves
+`{ subscribed: true }` at once without showing anything:
+
+| | User with Lens+ | User without Lens+ |
+|---|---|---|
+| **Lens+ Lens** | Eligible | Not eligible until they subscribe |
+| **Any other Lens** | Eligible | Eligible |
+
+Snapchat may also make a Lens+ Lens free for everyone, for example during a promotion that brings it more players and
+subscribers. Your game doesn't need to handle this: keep gating on `eligible`.
+
+A Lens you push to your phone isn't a Lens+ Lens, so every user is eligible there. Build and test the locked path on the
+[desktop stub](#the-three-environments) instead: its user starts without Lens+, and `requestUpgrade()` subscribes
+them after a fake half-second offer.
+
+### Submitting a Lens+ Lens
+
+Only a Lens+ Lens can have Lens+ content. When the submission scan finds calls to `snapchat.subscription` (see
+below), Snapchat enforces that:
+
+- **A new Lens becomes a Lens+ Lens when you submit it.** Snapchat enrolls it in Lens+. The Lens+ requirements
+  apply, and a submission that misses one is rejected with the reason:
+  - a verified phone number and Lens+ program eligibility;
+  - a video as the first preview;
+  - a Lens+ submission left in your monthly quota;
+  - no music or lyrics;
+  - Public visibility: a Hidden or Offline Lens is made Public, and a Draft is rejected.
+- **An update can't add Lens+.** An update that adds the calls to a Lens that isn't a Lens+ Lens is rejected. Decide
+  before the first submission, or submit a new Lens.
+- **Snapchat 14.33 or later.** Snapchat records 14.33 as the oldest version that can run the Lens, so users on older
+  versions don't get it.
+
+### Make sure the scan finds your calls
+
+The submission scan finds `getStatus()`, `requestUpgrade()` and `onStatusChanged()` called on anything named
+`subscription`, or on a variable assigned from it:
+
+```js
+snapchat.subscription.getStatus();               // found
+this.subscription.getStatus();                   // found: named subscription
+
+const sub = snapchat.subscription;
+sub.requestUpgrade();                            // found: a variable assigned from it
+
+this.lensPlus = snapchat.subscription;
+this.lensPlus.getStatus();                       // missed: a property with another name
+
+const check = (api) => api.getStatus();
+check(snapchat.subscription);                    // missed: passed to a function
+```
+
+A Lens whose calls are all missed is never enrolled. Snapchat still serves it the `subscription` API, so every user is
+eligible and its Lens+ content is open to everyone. Keep the name `subscription`, or assign it to a variable.
+Bundling this API without calling it doesn't enroll a Lens.
 
 ## PlayCanvas
 
@@ -308,28 +392,8 @@ document.addEventListener('visibilitychange', () => {
 A `get` answers for the account signed in at that moment, so a value read at startup is a copy: write what
 changed as it changes, rather than writing that copy back later over saves made since.
 
-**Lens+ gated content.** Only booleans cross the bridge, and purchase runs natively: the game can ask for the
-upsell, never take payment.
-
-Only a Lens+ Lens has Lens+ content, so a Lens that calls `subscription` must be one. Submitting a new Lens whose
-code calls it enrolls the Lens in Lens+, with the usual Lens+ requirements: a verified phone number, Lens+ program
-eligibility, Public visibility, a video as the first preview, monthly Lens+ quota left, and no music. An update can't
-add the calls to a Lens that isn't Lens+, and during the limited beta only listed developers can submit one.
-Including this API without calling `subscription` doesn't count.
-
-On a Lens+ Lens, a user with Lens+ is eligible, and anyone else isn't until they subscribe. On a Lens that isn't
-Lens+ exclusive, every user is eligible and `requestUpgrade()` resolves `{ subscribed: true }` without showing
-anything, so whatever you gate on them is open to every user. That is the case:
-
-- until the Lens is live as a Lens+ Lens, some time after it passes review;
-- on push to device;
-- if the Lens stops being a Lens+ Lens;
-- if the submission scan found no calls, so the Lens was never enrolled. The scan looks for calls on
-  `snapchat.subscription` or a variable holding it, so call the methods there rather than passing the namespace to
-  a function.
-
-Build and test the locked path on the desktop stub, whose Lens+ user starts without the entitlement. Act on
-`requestUpgrade()`'s `subscribed` rather than waiting for `onStatusChanged`, which not every host sends:
+**Lens+ gated content.** Lock the content on `getStatus()`, and unlock it when `requestUpgrade()` resolves
+`subscribed`. [Lens+](#lens) explains when content is locked and how a Lens becomes a Lens+ Lens:
 
 ```js
 async function unlockBonusLevel() {
@@ -337,10 +401,10 @@ async function unlockBonusLevel() {
   try {
     if ((await snapchat.subscription.getStatus()).eligible) return true;
     const { subscribed, reason } = await snapchat.subscription.requestUpgrade();
-    if (reason) console.info('Upsell not completed:', reason);   // 'too_soon' | 'already_in_flight' | 'user_ineligible'
+    if (reason) console.info('Upgrade offer not completed:', reason);   // 'too_soon' | 'already_in_flight' | 'user_ineligible'
     return subscribed;
   } catch (e) {
-    console.warn('Lens+ unavailable:', e.message);           // ERR_INTERNAL: nothing could present the upsell
+    console.warn('Lens+ unavailable:', e.message);           // ERR_INTERNAL: nothing could show the offer
     return false;
   }
 }
@@ -400,8 +464,8 @@ the device: a user without a Bitmoji, an expired media URL, `ERR_INTERNAL`, dura
 the limit on `storage` calls in flight, so a save every frame only fails on a device.
 Its 3D avatar is an empty placeholder, so show your default avatar there (see the recipes). It serves `bitmoji` v2
 with three fixed friends that wear the same placeholders, and no cooldown, so a user without friends and the
-cooldown only show up on a device. Its Lens+ user starts
-without the entitlement, and `requestUpgrade()` subscribes them after a fake 500 ms upsell and fires
+cooldown only show up on a device. Its user starts without Lens+: `getStatus()` resolves `{ eligible: false }`, and
+`requestUpgrade()` subscribes them after a fake 500 ms upgrade offer and fires
 `onStatusChanged`; it never declines or throttles. Its `haptics` checks params like a device but vibrates
 nothing, so how a pattern feels only shows on a device. Test those paths on a device.
 
