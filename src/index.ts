@@ -27,7 +27,7 @@ import type { CapabilityMap, FriendAvatar, SnapchatWebLensAPI, StorageInfo, Subm
 export type * from './types';
 export { errors };
 
-const VERSION = '0.2.0';
+const VERSION = '0.2.1';
 
 // The hosts serve storage as `games_storage`; the API names it `storage`, after its namespace. Every other
 // capability has the same name on both sides.

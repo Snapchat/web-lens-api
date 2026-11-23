@@ -482,7 +482,7 @@ test('global: window.snapchat is the API and window.SnapSDK is a deprecated alia
     const api = load(win);
     assert.strictEqual(win.snapchat, api);
     assert.strictEqual(win.SnapSDK, api);
-    assert.strictEqual(api.version, '0.2.0');
+    assert.strictEqual(api.version, '0.2.1');
 });
 
 test('global: the API adds only the subscription and haptics namespaces to 0.1.2, and no push surface', () => {

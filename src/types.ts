@@ -70,13 +70,13 @@ export interface SubscriptionStatus {
 }
 
 export interface UpgradeOutcome {
-    /** Whether the user holds the entitlement once the flow terminated. */
+    /** Whether the user has Lens+ when the flow ends. */
     subscribed: boolean;
     /**
-     * Set when the upsell didn't complete for a reason other than the user's choice. `too_soon`: the Lens opened
-     * moments ago, and the host showed nothing; `already_in_flight`: another upsell is on screen, and the host showed
-     * nothing; `user_ineligible`: the user can't buy Lens+ in the app (for example, their subscription is managed
-     * elsewhere), and the host tells them so itself.
+     * Set when the upgrade offer didn't complete for a reason other than the user's choice. `too_soon`: the Lens
+     * opened moments ago, and Snapchat showed nothing; `already_in_flight`: another upgrade offer is on screen, and
+     * Snapchat showed nothing; `user_ineligible`: the user can't buy Lens+ in the app (for example, their subscription
+     * is managed elsewhere), and Snapchat tells them so itself.
      */
     reason?: 'too_soon' | 'already_in_flight' | 'user_ineligible';
 }
@@ -223,22 +223,20 @@ export interface LeaderboardsAPI {
 }
 
 /**
- * Lens+ entitlement for paywalled Lenses (`subscription` capability, v1). Only booleans and stable
- * reason strings ever cross the bridge: never the provider, status, tier or expiry. Purchase runs
- * natively; the Lens can only ask the host to present the upsell.
+ * Lens+ content for Web Lenses (`subscription` capability, v1). The game checks whether the user can use its Lens+
+ * content and asks Snapchat to show the Lens+ upgrade offer. Snapchat runs the payment: only yes-or-no answers and
+ * stable reason strings cross the bridge, never the price, plan, provider or expiry.
  *
- * Only a Lens+ (exclusive) Lens has Lens+ content, so a Lens that calls these methods must be one: submitting it
- * enrolls a new Lens in Lens+, and an update can't add the calls to a Lens that isn't.
+ * Snapchat decides who is eligible: on a Lens+ Lens, only users with Lens+. On any other Lens every user is eligible,
+ * and `requestUpgrade()` resolves `{ subscribed: true }` at once without showing anything. Snapchat may also make a
+ * Lens+ Lens free for everyone, for example during a promotion; keep gating on `eligible`. A Lens you push to your
+ * phone isn't a Lens+ Lens, so test the locked path on the desktop stub.
  *
- * On a Lens+ Lens, a user with Lens+ is eligible, and anyone else is not until they subscribe. On a Lens that isn't
- * Lens+ exclusive, every user is eligible and `requestUpgrade()` resolves `{ subscribed: true }` without showing
- * anything, so whatever the Lens gates on these is open to every user. That is the case:
- *
- * - until the Lens is live as a Lens+ Lens, some time after it passes review;
- * - on push to device;
- * - if the Lens stops being a Lens+ Lens;
- * - if the submission scan found no calls, so the Lens was never enrolled. The scan looks for calls on
- *   `snapchat.subscription` or a variable holding it, not for the namespace passed to a function.
+ * When the submission scan finds calls, submitting a new Lens makes it a Lens+ Lens, and an update can't add them to
+ * a Lens that isn't one. The scan finds calls on anything named `subscription` (`snapchat.subscription`,
+ * `this.subscription`) or on a variable assigned from it, not through a property with another name or a function
+ * parameter; a Lens whose calls are all missed is never a Lens+ Lens. The Lens+ guide and the package README list
+ * the requirements.
  */
 export interface SubscriptionAPI {
     /**
@@ -252,25 +250,24 @@ export interface SubscriptionAPI {
      */
     getStatus(): Promise<SubscriptionStatus>;
     /**
-     * Shows the Lens+ upsell, then the native paywall on CTA. Resolves once the flow terminates. UI only
-     * shows on a Lens+ Lens, to a user without Lens+: a user with Lens+, or any user on a Lens that isn't Lens+
-     * exclusive, gets `{ subscribed: true }` at once. A host may instead resolve
-     * `{ subscribed: false, reason }`: when it throttles the upsell and shows nothing, or when the user can't buy
-     * Lens+ in the app. Rejects `ERR_INTERNAL` when nothing can present it.
+     * Shows the Lens+ upgrade offer, then Snapchat's paywall if the user taps through, and resolves when they're
+     * done. Nothing shows to a user with Lens+, or to anyone on a Lens that isn't a Lens+ Lens: they get
+     * `{ subscribed: true }` at once. It resolves `{ subscribed: false, reason }` when Snapchat throttles the offer and
+     * shows nothing, or when the user can't buy Lens+ in the app. Rejects `ERR_INTERNAL` when nothing can show it.
      *
      * @example
      * ```js
      * unlockButton.onclick = async () => {
      *     const { subscribed, reason } = await snapchat.subscription.requestUpgrade();
      *     if (subscribed) startBonusLevel();
-     *     else if (reason) console.info('Upsell not completed:', reason); // 'too_soon' | 'already_in_flight' | 'user_ineligible'
+     *     else if (reason) console.info('Upgrade offer not completed:', reason); // 'too_soon' | 'already_in_flight' | 'user_ineligible'
      * };
      * ```
      */
     requestUpgrade(): Promise<UpgradeOutcome>;
     /**
-     * Fires with `{ eligible }` whenever the entitlement changes while this Lens is active, including
-     * a subscription completed through another surface. Not every host sends these events, so rely on
+     * Fires with `{ eligible }` whenever the user's Lens+ status changes while this Lens is open, including
+     * after subscribing in another Lens or in Settings. Not every Snapchat version sends these events, so rely on
      * {@link SubscriptionAPI.requestUpgrade}'s `subscribed` and {@link SubscriptionAPI.getStatus} rather than
      * waiting for it.
      *

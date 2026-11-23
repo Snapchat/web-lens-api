@@ -1,4 +1,4 @@
-/*! @snap/web-lens-api v0.2.0 | Copyright © 2026 Snap Inc. | MIT License */
+/*! @snap/web-lens-api v0.2.1 | Copyright © 2026 Snap Inc. | MIT License */
 "use strict";
 (() => {
   // src/errors.ts
@@ -338,7 +338,7 @@
   }
 
   // src/index.ts
-  var VERSION = "0.2.0";
+  var VERSION = "0.2.1";
   var WIRE_STORAGE = "games_storage";
   var API_NAMES = /* @__PURE__ */ new Map([[WIRE_STORAGE, "storage"]]);
   function toSubmitScoreResult(reply) {
